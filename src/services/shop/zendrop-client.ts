@@ -20,7 +20,7 @@ export const ZENDROP_ENDPOINT = process.env.ZENDROP_MCP_URL || "https://app.zend
 const DEFAULT_TIMEOUT_MS = 30_000;
 
 export class ZendropError extends Error {
-    constructor(message: string, readonly code?: number) {
+    constructor(message: string, readonly code?: number, readonly retryAfter?: string | null) {
         super(message);
         this.name = "ZendropError";
     }
@@ -40,6 +40,18 @@ export function zendropConfigured(): boolean {
 
 let requestId = 0;
 
+/** Zendrop rate limits a sustained sync, so a 429 is retried rather than lost. */
+const MAX_RETRIES = 4;
+
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+/** Retry-After when the server sends one, otherwise exponential backoff. */
+function backoffMs(attempt: number, retryAfter: string | null): number {
+    const header = Number(retryAfter);
+    if (Number.isFinite(header) && header > 0) return Math.min(header * 1000, 60_000);
+    return Math.min(1000 * 2 ** attempt, 30_000);
+}
+
 /**
  * Call one Zendrop MCP tool and return its decoded payload.
  *
@@ -50,6 +62,20 @@ export async function callZendropTool<T = any>(tool: string, args: Record<string
     const token = process.env.ZENDROP_API_ACCESS_TOKEN;
     if (!token) throw new ZendropNotConfiguredError();
 
+    for (let attempt = 0; ; attempt++) {
+        try {
+            return await attemptCall<T>(token, tool, args, timeoutMs);
+        } catch (e) {
+            const rateLimited = e instanceof ZendropError && e.code === 429;
+            if (!rateLimited || attempt >= MAX_RETRIES) throw e;
+            const wait = backoffMs(attempt, (e as ZendropError).retryAfter ?? null);
+            log.warn("Zendrop rate limited, backing off", { tool, attempt: attempt + 1, waitMs: wait });
+            await sleep(wait);
+        }
+    }
+}
+
+async function attemptCall<T>(token: string, tool: string, args: Record<string, any>, timeoutMs: number): Promise<T> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -81,7 +107,7 @@ export async function callZendropTool<T = any>(tool: string, args: Record<string
     const raw = await res.text();
     if (!res.ok) {
         log.warn("Zendrop returned an error status", { tool, status: res.status });
-        throw new ZendropError(`Zendrop responded ${res.status}`, res.status);
+        throw new ZendropError(`Zendrop responded ${res.status}`, res.status, res.headers.get("retry-after"));
     }
 
     let envelope: any;

@@ -18,8 +18,12 @@ const log = logger.child({ service: "CatalogSync" });
 /** US is the reference market for the markup, per the pricing rule. */
 const PRICING_COUNTRY = "US";
 
-/** Shipping quotes are ~1s each; a dozen at a time keeps a page under ~3s. */
-const SHIPPING_BATCH = 12;
+/**
+ * Shipping quotes are ~1s each. Twelve at a time was fast but tripped Zendrop's
+ * rate limit part way through a multi category sync, so this trades a little
+ * speed for a sync that actually finishes.
+ */
+const SHIPPING_BATCH = 6;
 
 /**
  * Listing a large category is the slowest call Zendrop makes. Apparel holds

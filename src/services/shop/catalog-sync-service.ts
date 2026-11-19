@@ -21,6 +21,12 @@ const PRICING_COUNTRY = "US";
 /** Shipping quotes are ~1s each; a dozen at a time keeps a page under ~3s. */
 const SHIPPING_BATCH = 12;
 
+/**
+ * Listing a large category is the slowest call Zendrop makes. Apparel holds
+ * 110k products and blew past the 30s default, so paging gets its own ceiling.
+ */
+const LISTING_TIMEOUT_MS = 120_000;
+
 interface ZendropProduct {
     id: number;
     name: string;
@@ -81,6 +87,7 @@ export class CatalogSyncService {
         const res = await callZendropTool<{ total: number; products: ZendropProduct[] }>(
             "get_catalog_products",
             { category_id: categoryId, page, limit },
+            LISTING_TIMEOUT_MS,
         );
         const products = res?.products || [];
         const category = await this.categoryRepo.findOne({ where: { zendropCategoryId: categoryId } });

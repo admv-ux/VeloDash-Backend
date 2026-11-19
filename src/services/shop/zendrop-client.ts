@@ -12,7 +12,12 @@ const log = logger.child({ service: "ZendropClient" });
  */
 
 export const ZENDROP_ENDPOINT = process.env.ZENDROP_MCP_URL || "https://app.zendrop.com/mcp/v1";
-const TIMEOUT_MS = 30_000;
+/**
+ * Default per call ceiling. Catalogue listings for the big categories are the
+ * slow ones: Apparel has 110k products and took longer than 30s, so callers
+ * that page a large category pass their own, longer timeout.
+ */
+const DEFAULT_TIMEOUT_MS = 30_000;
 
 export class ZendropError extends Error {
     constructor(message: string, readonly code?: number) {
@@ -41,12 +46,12 @@ let requestId = 0;
  * MCP wraps results as `content: [{type:"text", text:"<json>"}]`, so the JSON
  * is parsed out of that envelope and handed back as a plain object.
  */
-export async function callZendropTool<T = any>(tool: string, args: Record<string, any> = {}): Promise<T> {
+export async function callZendropTool<T = any>(tool: string, args: Record<string, any> = {}, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<T> {
     const token = process.env.ZENDROP_API_ACCESS_TOKEN;
     if (!token) throw new ZendropNotConfiguredError();
 
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
 
     let res: Response;
     try {
@@ -66,7 +71,7 @@ export async function callZendropTool<T = any>(tool: string, args: Record<string
             }),
         });
     } catch (e) {
-        const reason = (e as Error).name === "AbortError" ? "timed out" : (e as Error).message;
+        const reason = (e as Error).name === "AbortError" ? `timed out after ${timeoutMs}ms` : (e as Error).message;
         log.warn("Zendrop request failed", { tool, reason });
         throw new ZendropError(`Zendrop request ${reason}`);
     } finally {

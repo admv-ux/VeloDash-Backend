@@ -34,6 +34,13 @@ describe("CORS allowlist", () => {
         expect(res.headers["access-control-allow-origin"]).toBe("https://admin.velocouriersvc.com");
     });
 
+    it("allows the shop, which is a different domain on the same API", async () => {
+        const res = await request(buildApp())
+            .get("/api/v1/anything")
+            .set("Origin", "https://shopvelodash.com");
+        expect(res.headers["access-control-allow-origin"]).toBe("https://shopvelodash.com");
+    });
+
     it("sends no CORS headers to an unknown origin, but does not 500", async () => {
         const res = await request(buildApp())
             .get("/api/v1/anything")

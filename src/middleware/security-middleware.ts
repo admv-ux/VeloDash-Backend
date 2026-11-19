@@ -16,7 +16,10 @@ import rateLimit from "express-rate-limit";
 export function allowedOrigins(): string[] {
     return (
         process.env.CORS_ALLOWED_ORIGINS ||
-        "https://admin.velocouriersvc.com,https://velocouriersvc.com,https://www.velocouriersvc.com"
+        "https://admin.velocouriersvc.com,https://velocouriersvc.com,https://www.velocouriersvc.com," +
+        // The shop is a separate domain calling the same API from the browser,
+        // so it has to be listed or every catalogue request is blocked by CORS.
+        "https://shopvelodash.com,https://www.shopvelodash.com"
     ).split(",").map(o => o.trim()).filter(Boolean);
 }
 

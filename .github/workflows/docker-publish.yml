@@ -67,7 +67,10 @@ jobs:
       # rather than at whatever the manifest was last committed with, because the
       # two drifted when the repo moved GitHub org and the cluster then kept
       # pulling a stale image from the old path while every deploy reported success.
-      IMAGE_PATH: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+      # Built from the github context, not ${{ env.* }}: the env context is not
+      # available inside a job level env block and referencing it there makes the
+      # whole workflow file invalid.
+      IMAGE_PATH: ghcr.io/${{ github.repository_owner }}/velo-backend
       # Optional: set these repo secrets to keep the GHCR package PRIVATE.
       # If GHCR_PULL_TOKEN is empty, the package is expected to be PUBLIC.
       GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}

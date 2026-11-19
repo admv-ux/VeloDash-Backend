@@ -51,6 +51,7 @@ import subscriptionRoutes from "./routes/subscription-routes";
 import identityRoutes from "./routes/identityRoutes";
 import checkoutRoutes from "./routes/checkoutRoutes";
 import supabaseRoutes from "./routes/supabaseRoutes";
+import shopRoutes from "./routes/shopRoutes";
 
 
 const app = express();
@@ -119,6 +120,9 @@ app.use(`/${PUBLIC_BUCKET}`, publicAssetRoutes);
 // Each of these either sends a message that costs money or is worth guessing
 // at repeatedly.
 RATE_LIMITED_AUTH_PATHS.forEach(p => app.use(p, otpLimiter));
+// Public storefront: no API key, no auth. Browsing must not need an account.
+app.use("/api/v1/shop", shopRoutes);
+
 app.use("/api/v1/auth", authRoutes);
 app.use("/api/v1/profile", profileRoutes);
 app.use("/api/v1/support", supportRoutes);

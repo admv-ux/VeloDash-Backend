@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { AdminController } from "../controllers/AdminController";
+import { AdminShopController } from "../controllers/AdminShopController";
 import { apiKeyMiddleware } from "../middleware/api-key-middleware";
 import { requireRole } from "../middleware/role-middleware";
 import { validate, body } from "../middleware/validate";
@@ -7,6 +8,7 @@ import { OrderStatus } from "../models/order";
 
 const router = Router();
 const adminController = new AdminController();
+const adminShopController = new AdminShopController();
 
 // All admin routes require API Key and Admin Role
 router.use(apiKeyMiddleware);
@@ -1686,5 +1688,15 @@ router.get("/categories", adminRole, adminController.getCategories);
 router.post("/categories", adminRole, adminController.createCategory);
 router.patch("/categories/:id", adminRole, adminController.updateCategory);
 router.delete("/categories/:id", adminRole, adminController.deleteCategory);
+
+// ════════════════════════════════════════════════════════════════
+//  SHOP (Zendrop catalogue)
+// ════════════════════════════════════════════════════════════════
+router.get("/shop/status", adminRole, adminShopController.status);
+router.get("/shop/products", adminRole, adminShopController.listProducts);
+router.patch("/shop/products/:id", adminRole, adminShopController.updateProduct);
+router.post("/shop/sync/categories", adminRole, adminShopController.syncCategories);
+router.post("/shop/sync/category/:categoryId", adminRole, adminShopController.syncCategory);
+router.post("/shop/reprice", adminRole, adminShopController.repriceAll);
 
 export default router;

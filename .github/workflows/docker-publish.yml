@@ -62,6 +62,7 @@ jobs:
       STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
       STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
       STRIPE_IDENTITY_WEBHOOK_SECRET: ${{ secrets.STRIPE_IDENTITY_WEBHOOK_SECRET }}
+      ZENDROP_API_ACCESS_TOKEN: ${{ secrets.ZENDROP_API_ACCESS_TOKEN }}
       # Optional: set these repo secrets to keep the GHCR package PRIVATE.
       # If GHCR_PULL_TOKEN is empty, the package is expected to be PUBLIC.
       GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
@@ -81,7 +82,7 @@ jobs:
           port: ${{ secrets.VPS_PORT }}
           request_pty: true
           command_timeout: 900s
-          envs: STRIPE_SECRET_KEY,STRIPE_WEBHOOK_SECRET,STRIPE_IDENTITY_WEBHOOK_SECRET,GHCR_PULL_TOKEN,GHCR_PULL_USER,SMTP_PASSWORD,FALLBACK_SMTP_PASSWORD
+          envs: STRIPE_SECRET_KEY,STRIPE_WEBHOOK_SECRET,STRIPE_IDENTITY_WEBHOOK_SECRET,GHCR_PULL_TOKEN,GHCR_PULL_USER,SMTP_PASSWORD,FALLBACK_SMTP_PASSWORD,ZENDROP_API_ACCESS_TOKEN
           script: |
             echo "=========================================="
             echo "🚀 DEPLOYMENT STARTED"
@@ -109,6 +110,7 @@ jobs:
             # Identity endpoint (/api/v1/identity/webhook) cannot share the
             # payments one. Falls back to STRIPE_WEBHOOK_SECRET when unset.
             set_secret STRIPE_IDENTITY_WEBHOOK_SECRET "$STRIPE_IDENTITY_WEBHOOK_SECRET"
+            set_secret ZENDROP_API_ACCESS_TOKEN "$ZENDROP_API_ACCESS_TOKEN"
             echo ""
 
             # ── Step 0.1: SMTP config (Spacemail) for password-reset emails ──

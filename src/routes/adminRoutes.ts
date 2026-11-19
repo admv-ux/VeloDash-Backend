@@ -1698,5 +1698,7 @@ router.patch("/shop/products/:id", adminRole, adminShopController.updateProduct)
 router.post("/shop/sync/categories", adminRole, adminShopController.syncCategories);
 router.post("/shop/sync/category/:categoryId", adminRole, adminShopController.syncCategory);
 router.post("/shop/reprice", adminRole, adminShopController.repriceAll);
+router.get("/shop/merchant-applications", adminRole, adminShopController.listApplications);
+router.patch("/shop/merchant-applications/:id", adminRole, adminShopController.updateApplication);
 
 export default router;

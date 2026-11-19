@@ -83,7 +83,7 @@ multiplier.
 |---|---|---|
 | 1 | Zendrop MCP client + pricing engine | **done**, 14 pricing tests + 7 sync tests |
 | 2 | Catalog API (list, filter, detail, categories) | **done**, public, no auth |
-| 3 | Storefront at shopvelodash.com | pending |
+| 3 | Storefront: browse, filter, product, basket, merchant application | **built**, not yet deployed |
 | 4 | Cart, checkout, Stripe payment | pending |
 | 5 | Order push to Zendrop fulfillment | pending |
 | 6 | Block instant dispatch for shopping orders | pending |

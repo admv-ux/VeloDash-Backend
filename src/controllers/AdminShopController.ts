@@ -4,6 +4,8 @@ import { ShopProduct } from "../models/shop-product";
 import { CatalogSyncService } from "../services/shop/catalog-sync-service";
 import { zendropConfigured } from "../services/shop/zendrop-client";
 import { retailPriceFor } from "../config/shop-pricing";
+import { MerchantApplicationService, MerchantApplicationError } from "../services/shop/merchant-application-service";
+import { MerchantApplicationStatus } from "../models/merchant-application";
 import logger from "../utils/logger";
 
 const log = logger.child({ controller: "AdminShop" });
@@ -14,6 +16,7 @@ const log = logger.child({ controller: "AdminShop" });
  */
 export class AdminShopController {
     private sync = new CatalogSyncService();
+    private applications = new MerchantApplicationService();
     private productRepo = () => AppDataSource.getRepository(ShopProduct);
 
     status = async (_req: Request, res: Response) => {
@@ -137,5 +140,29 @@ export class AdminShopController {
         }
         log.info("Repriced catalogue", { examined: all.length, changed });
         res.json({ examined: all.length, changed });
+    };
+
+    listApplications = async (req: Request, res: Response) => {
+        const status = req.query.status as MerchantApplicationStatus | undefined;
+        const page = Math.max(1, Number(req.query.page) || 1);
+        const limit = Math.min(200, Number(req.query.limit) || 50);
+        res.json(await this.applications.list(status, page, limit));
+    };
+
+    updateApplication = async (req: Request, res: Response) => {
+        try {
+            const row = await this.applications.update(req.params.id, {
+                status: req.body?.status,
+                adminNotes: req.body?.adminNotes,
+            });
+            res.json({ application: row });
+        } catch (e) {
+            if (e instanceof MerchantApplicationError) {
+                res.status(404).json({ message: e.message });
+                return;
+            }
+            log.error("updateApplication failed", { error: (e as Error).message });
+            res.status(500).json({ message: "Could not update the application" });
+        }
     };
 }

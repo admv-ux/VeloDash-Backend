@@ -1,8 +1,18 @@
 import { Router } from "express";
 import { ShopController } from "../controllers/ShopController";
+import rateLimit from "express-rate-limit";
 
 const router = Router();
 const shop = new ShopController();
+
+/** The application form is open to the internet, so it gets its own tight cap. */
+const applicationLimiter = rateLimit({
+    windowMs: 60 * 60_000,
+    limit: 5,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { message: "Too many applications from this address. Please try again later." },
+});
 
 /**
  * Public storefront catalogue.
@@ -67,5 +77,17 @@ router.get("/price-range", shop.getPriceRange);
  *       404: { description: Not found }
  */
 router.get("/products/:id", shop.getProduct);
+
+/**
+ * @openapi
+ * /shop/merchant-applications:
+ *   post:
+ *     tags: [Shop]
+ *     summary: Apply to sell on VeloDash
+ *     responses:
+ *       201: { description: Application received }
+ *       400: { description: Missing or invalid details }
+ */
+router.post("/merchant-applications", applicationLimiter, shop.submitMerchantApplication);
 
 export default router;

@@ -1,5 +1,6 @@
 import { Request, Response } from "express";
 import { ShopCatalogService } from "../services/shop/shop-catalog-service";
+import { MerchantApplicationService, MerchantApplicationError } from "../services/shop/merchant-application-service";
 import logger from "../utils/logger";
 
 const log = logger.child({ controller: "Shop" });
@@ -7,6 +8,7 @@ const log = logger.child({ controller: "Shop" });
 /** Public storefront reads. No auth: browsing must not require an account. */
 export class ShopController {
     private catalog = new ShopCatalogService();
+    private applications = new MerchantApplicationService();
 
     listProducts = async (req: Request, res: Response) => {
         try {
@@ -56,6 +58,21 @@ export class ShopController {
         } catch (e) {
             log.error("getPriceRange failed", { error: (e as Error).message });
             res.status(500).json({ message: "Could not load price range" });
+        }
+    };
+
+    /** Public "Sell with VeloDash" form. No account needed to apply. */
+    submitMerchantApplication = async (req: Request, res: Response) => {
+        try {
+            const application = await this.applications.submit(req.body || {});
+            res.status(201).json({ id: application.id, status: application.status });
+        } catch (e) {
+            if (e instanceof MerchantApplicationError) {
+                res.status(400).json({ message: e.message });
+                return;
+            }
+            log.error("submitMerchantApplication failed", { error: (e as Error).message });
+            res.status(500).json({ message: "Could not submit your application" });
         }
     };
 }

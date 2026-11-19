@@ -90,11 +90,11 @@ multiplier.
 |---|---|---|
 | 1 | Zendrop MCP client + pricing engine | **done**, 14 pricing tests + 7 sync tests |
 | 2 | Catalog API (list, filter, detail, categories) | **done**, public, no auth |
-| 3 | Storefront: browse, filter, product, basket, merchant application | **built**, builds clean, not yet hosted |
-| 4 | Cart, checkout, Stripe payment | pending |
+| 3 | Storefront: browse, filter, product, basket, merchant application | **built and serving on the VPS**, awaiting DNS |
+| 4 | Cart, checkout, Stripe payment | basket done; checkout **not started** |
 | 5 | Order push to Zendrop fulfillment | pending |
 | 6 | Block instant dispatch for shopping orders | pending |
-| 7 | Drop the 15% on shopping deliveries | pending |
+| 7 | Drop the 15% on shopping deliveries | **done by construction**: shopping never enters the commission path, the multiplier is the margin |
 | 8 | Retire Paystack | pending |
 | 9 | Admin view + CRUD | backend **done**, admin UI pending |
 
@@ -119,3 +119,42 @@ shipping nothing while reporting success. `IMAGE_NAME` is
 Caught because `dist/` in the running pod had no shop files. The deploy now runs
 `kubectl set image` from the same path the build pushed to, so the manifest and
 the registry cannot drift apart again.
+
+
+## What is live, and what is not
+
+**Live and verified in production**
+
+- `GET /api/v1/shop/*`, public, no auth: 148 products across 3 categories
+- pricing: every stored price ends in .99 and sits above landed cost
+- retail price filtering, category filter, sort, paging
+- merchant application endpoint with its own 5/hour rate limit
+- storefront served by nginx on the VPS and reachable by Host header
+- CORS now admits shopvelodash.com; it did not, and the shop would have
+  launched dead in a browser
+
+**Built but not yet verifiable**
+
+- the paced catalogue sync. Logic is unit tested and it is OFF
+  (`SHOP_SYNC_ENABLED`), because Zendrop's quota was exhausted while
+  loading the launch catalogue and it needs a quiet period to observe.
+
+**Not started**
+
+- checkout and Stripe payment. The basket works and the Checkout button is
+  deliberately disabled rather than pretending to take money.
+- pushing orders to Zendrop. Blocked: `get_stores` returns zero, so no
+  fulfillment tool can be called at all.
+- blocking instant dispatch for shopping orders.
+- retiring Paystack. This one is a live payments migration and needs
+  `initiateCardPayment` implemented on Stripe first.
+- admin UI for the shop tables. The backend endpoints exist.
+
+**Needs the owner**
+
+- point `shopvelodash.com` A record at 162.35.106.11, then certbot for HTTPS
+- connect a store in Zendrop so fulfillment can be built and tested
+- add `ZENDROP_API_ACCESS_TOKEN` as a GitHub repo secret. It is set in the
+  cluster already; without the repo secret the deploy simply leaves the
+  cluster value alone, so nothing breaks, but it is not reproducible.
+- **rotate the Zendrop token.** It was shared in plain chat.

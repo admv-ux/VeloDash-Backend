@@ -32,7 +32,10 @@ spec:
       containers:
         - name: velo-api
           # Image hosted on GitHub Container Registry - change owner/name/tag if needed
-          image: ghcr.io/velocouriersvc/velo-backend:latest
+          # The repo moved to the admv-ux GitHub org, so the build pushes here
+          # now. The deploy also sets this explicitly from the path it built, so
+          # the manifest and the registry cannot drift apart again.
+          image: ghcr.io/admv-ux/velo-backend:latest
           imagePullPolicy: Always
           ports:
             - containerPort: 3000

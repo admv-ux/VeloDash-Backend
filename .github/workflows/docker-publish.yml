@@ -63,6 +63,11 @@ jobs:
       STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
       STRIPE_IDENTITY_WEBHOOK_SECRET: ${{ secrets.STRIPE_IDENTITY_WEBHOOK_SECRET }}
       ZENDROP_API_ACCESS_TOKEN: ${{ secrets.ZENDROP_API_ACCESS_TOKEN }}
+      # The path the build actually pushed to. The deployment is pointed at this
+      # rather than at whatever the manifest was last committed with, because the
+      # two drifted when the repo moved GitHub org and the cluster then kept
+      # pulling a stale image from the old path while every deploy reported success.
+      IMAGE_PATH: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
       # Optional: set these repo secrets to keep the GHCR package PRIVATE.
       # If GHCR_PULL_TOKEN is empty, the package is expected to be PUBLIC.
       GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
@@ -82,13 +87,13 @@ jobs:
           port: ${{ secrets.VPS_PORT }}
           request_pty: true
           command_timeout: 900s
-          envs: STRIPE_SECRET_KEY,STRIPE_WEBHOOK_SECRET,STRIPE_IDENTITY_WEBHOOK_SECRET,GHCR_PULL_TOKEN,GHCR_PULL_USER,SMTP_PASSWORD,FALLBACK_SMTP_PASSWORD,ZENDROP_API_ACCESS_TOKEN
+          envs: STRIPE_SECRET_KEY,STRIPE_WEBHOOK_SECRET,STRIPE_IDENTITY_WEBHOOK_SECRET,GHCR_PULL_TOKEN,GHCR_PULL_USER,SMTP_PASSWORD,FALLBACK_SMTP_PASSWORD,ZENDROP_API_ACCESS_TOKEN,IMAGE_PATH
           script: |
             echo "=========================================="
             echo "🚀 DEPLOYMENT STARTED"
             echo "=========================================="
             echo "⏰ Time: $(date '+%Y-%m-%d %H:%M:%S %Z')"
-            echo "📦 Image: ghcr.io/velocouriersvc/velo-backend:latest"
+            echo "📦 Image: $IMAGE_PATH:latest"
             echo ""
 
             # -- Step 0: Update Kubernetes secrets --
@@ -197,6 +202,10 @@ jobs:
 
             # ── Step 2: Restart deployment ──
             echo "── RESTARTING DEPLOYMENT ──"
+            # Point the deployment at the image this run built. If it already
+            # matches, this is a no-op and the restart below still picks up a
+            # freshly pushed :latest.
+            sudo kubectl -n velo set image deployment/velo-api velo-api="$IMAGE_PATH:latest" || true
             sudo kubectl -n velo rollout restart deployment/velo-api
 
             # ── Step 3: Wait for rollout ──
@@ -290,7 +299,7 @@ jobs:
           } >> $GITHUB_STEP_SUMMARY
 
           if [ "$DEPLOY_OUTCOME" = "success" ]; then
-            echo "| **Image** | \`ghcr.io/velocouriersvc/velo-backend:latest\` |" >> $GITHUB_STEP_SUMMARY
+            echo "| **Image** | \`${IMAGE_PATH}:latest\` |" >> $GITHUB_STEP_SUMMARY
           else
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "Check the **Deploy to VPS** step logs above for full diagnostics." >> $GITHUB_STEP_SUMMARY

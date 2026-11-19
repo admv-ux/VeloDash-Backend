@@ -45,8 +45,15 @@ That also fixes a semantics problem: Zendrop's `min_price`/`max_price` filter th
 computed at sync time and stored, so the filter means what the customer thinks
 it means.
 
-One more quirk worth recording: the server rejects a JSON-RPC `id` that is not an
-integer, with -32600 "The [id] member must be a string, number".
+Two more quirks worth recording:
+
+- the server rejects a JSON-RPC `id` that is not an integer, with -32600
+  "The [id] member must be a string, number"
+- **Zendrop enforces a sustained quota, not just a burst limit.** Six rapid calls
+  pass fine, but syncing seven categories back to back got every subsequent call
+  429'd for minutes, and no short backoff recovers from that. The catalogue is
+  therefore filled by a paced background job taking ONE category page per tick,
+  15 minutes apart, off unless `SHOP_SYNC_ENABLED=true`.
 
 ### Two consequences
 
@@ -83,10 +90,32 @@ multiplier.
 |---|---|---|
 | 1 | Zendrop MCP client + pricing engine | **done**, 14 pricing tests + 7 sync tests |
 | 2 | Catalog API (list, filter, detail, categories) | **done**, public, no auth |
-| 3 | Storefront: browse, filter, product, basket, merchant application | **built**, not yet deployed |
+| 3 | Storefront: browse, filter, product, basket, merchant application | **built**, builds clean, not yet hosted |
 | 4 | Cart, checkout, Stripe payment | pending |
 | 5 | Order push to Zendrop fulfillment | pending |
 | 6 | Block instant dispatch for shopping orders | pending |
 | 7 | Drop the 15% on shopping deliveries | pending |
 | 8 | Retire Paystack | pending |
 | 9 | Admin view + CRUD | backend **done**, admin UI pending |
+
+## Live as of 2026-11-19
+
+Verified against production, not asserted:
+
+    GET /api/v1/shop/products      -> 148 products, no auth, no API key
+    GET /api/v1/shop/categories    -> Animals & Pet Supplies 50, Apparel 48,
+                                      Handbag & Wallet Accessories 50
+    GET /api/v1/shop/price-range   -> 9.99 to 74.99
+    price filter 20 to 40, asc     -> 16 matches, correctly ordered
+    all 60 sampled prices end .99  -> 0 violations
+
+### A deploy bug found on the way
+
+Every backend deploy since the repo moved to the **admv-ux** GitHub org had been
+shipping nothing while reporting success. `IMAGE_NAME` is
+`${{ github.repository_owner }}/velo-backend`, so the build started pushing to
+`ghcr.io/admv-ux/velo-backend` while the manifest still said
+`ghcr.io/velocouriersvc/velo-backend`, and the deploy only ran `rollout restart`.
+Caught because `dist/` in the running pod had no shop files. The deploy now runs
+`kubectl set image` from the same path the build pushed to, so the manifest and
+the registry cannot drift apart again.

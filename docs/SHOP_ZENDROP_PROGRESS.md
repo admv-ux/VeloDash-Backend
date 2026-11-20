@@ -255,3 +255,133 @@ and importing is rate limited the same way the catalogue sync is.
 - add the `www.shopvelodash.com` A record if `www` should work.
 - `ZENDROP_API_ACCESS_TOKEN` as a GitHub repo secret.
 - **rotate the Zendrop token.** It was shared in plain chat.
+
+
+## 2026-11-20 (later): checkout is live, the import is blocked
+
+### The product import could not run: the Zendrop token is read only
+
+The owner approved importing all 148 catalogue products into the connected
+Shopify store. The first call refused:
+
+```
+add_my_product        -> Insufficient scope: 'my_products:write' required.
+import_my_product     -> Insufficient scope: 'my_products:write' required.
+update_store_settings -> Insufficient scope: 'stores:write' required.
+fulfill_order         -> Insufficient scope: 'orders:write' required.
+```
+
+Every read tool works, so the catalogue sync and all the reporting above
+are unaffected. But the token cannot write, which blocks **both** remaining
+fulfillment steps, not just the import. A token with `my_products:write`
+and `orders:write` is needed. Since the token has to be rotated anyway
+(it was shared in plain chat), both can be done in one go.
+
+### Checkout: guest basket to paid order
+
+Stripe **hosted Checkout**, not Elements. Stripe collects the card and the
+shipping address on their own page, so the shop never touches card data,
+needs no publishable key and ships no payment JS. That also sidestepped a
+trap: the cluster's `STRIPE_PUBLISHABLE_KEY` is a `pk_test_` while the
+secret is `sk_live_`. Nothing uses it (the app carries its own key), but an
+Elements build would have picked it up and failed in production.
+
+New: `shop_orders`, `ShopCheckoutService`, `POST /shop/checkout`,
+`GET /shop/orders/:id`, `GET /shop/shipping-countries`, and
+`checkout.session.*` branches on the existing Stripe webhook.
+
+**Instant dispatch cannot happen, by construction.** `shop_orders` is its
+own table with no relation to the delivery `orders` table and no reference
+from any dispatch code. Supplier stock ships on a multi day estimate, so a
+shop order must never reach a courier queue. There is no field here a
+dispatcher could read, and nothing creates a delivery Order from one.
+
+### US only at launch, and that is a pricing limit not a shipping one
+
+Retail prices were built from Zendrop's **US** shipping quote. Measured on
+product 3217463 (wholesale 0.30, US shipping 4.16, landed 4.46, retail
+9.99):
+
+```
+US 4.16    GB 3.37    GH 10.61    NG 10.61
+```
+
+Ghana costs 6.45 more per item. Against the live catalogue that puts 4 of
+148 products underwater, averaging 0.57 below cost, and it thins the margin
+on everything else. Checkout therefore accepts US addresses only, read from
+`platform_settings.shopAllowedCountries`, so widening the list is a settings
+change rather than a deploy once per destination shipping is priced at sync
+time. Note GB is already *cheaper* than the US on this sample, so it is
+likely safe to add after a wider check.
+
+The storefront reads that same list, so the home page says where it ships
+instead of claiming "worldwide".
+
+### Verified in production, without charging a card
+
+- a real live Stripe session: total 1230.97 matched the basket exactly, and
+  the hosted page rendered the right line items, images, per unit prices,
+  prefilled email, VELO branding and a country field locked to the US
+- price tampering: posting `price: 0.01` for a 586.99 product produced an
+  order of **586.99**. The client sends ids and quantities; the server
+  prices everything
+- rejected, each with the right status: empty basket, missing items key,
+  quantity 0 / -5 / 1.5 / 999, duplicate lines summing past the cap, a SQL
+  shaped id, an unknown uuid. None of them created an order row
+- the rate limiter fired during testing and the storefront surfaced it
+  rather than silently failing
+- webhook, signed with the real secret from inside the pod: a valid event
+  marked the order paid, stamped the payment intent and stored the address;
+  a **replay changed nothing** (one "Shop order paid" line for two
+  deliveries); a **bad signature was rejected**; an event claiming 1.00
+  against a 586.99 order was **refused** with "Paid amount is below the
+  order total"
+
+### Browser verification of the buying flow
+
+26 checks against the live site at 1440px and 390px, all passing: empty
+basket, adding from the shop, the badge count, two basket lines, delivery
+shown as included, the shipping line, quantity edits recalculating, the
+handoff landing on Stripe with the same total and the email carried over,
+the country locked to the US, cancel returning to a full basket, the
+confirmation page (order number, total, address, and the wording that this
+is not a same day delivery), the basket clearing after payment, an unknown
+order id handled, and no horizontal overflow or console errors.
+
+Two things that looked like bugs and were not: Stripe renders its form in a
+cross-origin iframe, so assertions had to read every frame and input
+values, not just the top document; and the only console error came from
+`api.hcaptcha.com` returning 429 on Stripe's own page, after repeated
+testing from one address. Our own origin served zero 4xx.
+
+The storefront suite from earlier was re-run after the shipping copy change:
+55/55 still passing.
+
+### Cleanup
+
+Verification created 7 orders and 7 live Stripe sessions. All 7 orders were
+deleted (scoped by the synthetic payment intent and the verification email
+addresses, never a blanket delete) and all 7 sessions explicitly expired.
+`shop_orders` is back to 0 rows and 0 revenue, so the first row in there
+will be a real customer.
+
+### Admin
+
+`/shop` in the dashboard: Orders (paid revenue, awaiting payment, awaiting
+fulfilment, and a fulfilment control), Catalogue (landed cost, multiplier,
+retail, margin) and Merchant applications. `PATCH /admin/shop/orders/:id`
+deliberately cannot set `status`: whether the money arrived is Stripe's
+answer, not an admin's.
+
+Endpoints are live and correctly gated (403 unauthenticated). Rendering the
+page with real data was not verified from here: it needs an admin login,
+and reading a real admin's phone number to impersonate them was out of
+bounds. Worth a look next time you are signed in.
+
+### Still needs the owner
+
+1. **A Zendrop token with write scopes** (`my_products:write`,
+   `orders:write`), which also rotates the leaked one.
+2. **The Shopify Admin API token** (`shpat_...`), still outstanding.
+3. `ZENDROP_API_ACCESS_TOKEN` as a GitHub repo secret.
+4. The `www.shopvelodash.com` A record, if `www` should resolve.

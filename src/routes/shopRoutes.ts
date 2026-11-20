@@ -90,4 +90,53 @@ router.get("/products/:id", shop.getProduct);
  */
 router.post("/merchant-applications", applicationLimiter, shop.submitMerchantApplication);
 
+/** Checkout creates a Stripe session per call, so it gets its own cap. */
+const checkoutLimiter = rateLimit({
+    windowMs: 15 * 60_000,
+    limit: 20,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { message: "Too many checkout attempts. Please try again shortly." },
+});
+
+/**
+ * @openapi
+ * /shop/checkout:
+ *   post:
+ *     tags: [Shop]
+ *     summary: Start a Stripe hosted checkout for a guest basket
+ *     responses:
+ *       201: { description: Order created, returns the Stripe checkout URL }
+ *       400: { description: Basket is empty or invalid }
+ *       409: { description: An item is unavailable or out of stock }
+ *       502: { description: Stripe could not be reached }
+ */
+router.post("/checkout", checkoutLimiter, shop.startCheckout);
+
+/**
+ * @openapi
+ * /shop/shipping-countries:
+ *   get:
+ *     tags: [Shop]
+ *     summary: Destinations checkout currently accepts
+ *     responses:
+ *       200: { description: ISO 3166-1 alpha-2 codes }
+ */
+router.get("/shipping-countries", shop.getShippingCountries);
+
+/**
+ * @openapi
+ * /shop/orders/{id}:
+ *   get:
+ *     tags: [Shop]
+ *     summary: One order, looked up by its id
+ *     description: The order uuid is unguessable and acts as the capability token, so a guest can see their own order without an account.
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *     responses:
+ *       200: { description: The order }
+ *       404: { description: Not found }
+ */
+router.get("/orders/:id", shop.getOrder);
+
 export default router;

@@ -156,6 +156,16 @@ export class PlatformSettings {
     @Column({ type: "integer", default: 10 })
     partnerReferralThreshold: number;
 
+    // Shop: which destinations checkout will accept, as ISO 3166-1 alpha-2,
+    // comma separated. US only at launch, and that is a pricing constraint
+    // rather than a shipping one: retail prices were built from Zendrop's US
+    // shipping quote, so selling into a dearer destination eats the margin.
+    // Measured 2026-11-20, Ghana costs 6.45 more per item than the US, which
+    // puts the cheapest 4 of 148 products underwater. Widening this is a
+    // settings change once per destination shipping is priced at sync time.
+    @Column({ type: "varchar", length: 500, default: "US" })
+    shopAllowedCountries: string;
+
     @Column({ type: "integer", default: 10 })
     leaderboardLimit: number;
 

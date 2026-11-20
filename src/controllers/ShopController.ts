@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import { ShopCatalogService } from "../services/shop/shop-catalog-service";
 import { MerchantApplicationService, MerchantApplicationError } from "../services/shop/merchant-application-service";
+import { ShopCheckoutService, CheckoutError } from "../services/shop/shop-checkout-service";
 import logger from "../utils/logger";
 
 const log = logger.child({ controller: "Shop" });
@@ -9,6 +10,80 @@ const log = logger.child({ controller: "Shop" });
 export class ShopController {
     private catalog = new ShopCatalogService();
     private applications = new MerchantApplicationService();
+    private checkout = new ShopCheckoutService();
+
+    /**
+     * Where Stripe sends the shopper back to. Built here, never taken from the
+     * request: a success_url the caller supplies is an open redirect, and it
+     * is one Stripe itself would send the victim to.
+     */
+    private get shopBaseUrl(): string {
+        return (process.env.SHOP_BASE_URL || "https://shopvelodash.com").replace(/\/+$/, "");
+    }
+
+    /**
+     * POST /shop/checkout
+     * Public and guest friendly. Takes ids and quantities only; every price
+     * is recomputed from our own records.
+     */
+    startCheckout = async (req: Request, res: Response) => {
+        try {
+            const result = await this.checkout.createCheckout({
+                lines: req.body?.items,
+                email: req.body?.email,
+                successUrl: `${this.shopBaseUrl}/order/{ORDER_ID}`,
+                cancelUrl: `${this.shopBaseUrl}/cart?cancelled=1`,
+            });
+            res.status(201).json(result);
+        } catch (e) {
+            if (e instanceof CheckoutError) {
+                res.status(e.statusCode).json({ message: e.message });
+                return;
+            }
+            log.error("startCheckout failed", { error: (e as Error).message });
+            res.status(500).json({ message: "Could not start checkout" });
+        }
+    };
+
+    /** GET /shop/orders/:id - the uuid is the capability token. */
+    getOrder = async (req: Request, res: Response) => {
+        try {
+            const order = await this.checkout.getOrder(req.params.id);
+            if (!order) {
+                res.status(404).json({ message: "Order not found" });
+                return;
+            }
+            res.json({
+                order: {
+                    id: order.id,
+                    orderNumber: order.orderNumber,
+                    email: order.email,
+                    items: order.items,
+                    subtotal: Number(order.subtotal),
+                    total: Number(order.total),
+                    currency: order.currency,
+                    status: order.status,
+                    fulfillmentStatus: order.fulfillmentStatus,
+                    paidAt: order.paidAt,
+                    shippingAddress: order.shippingAddress,
+                    createdAt: order.createdAt,
+                },
+            });
+        } catch (e) {
+            log.error("getOrder failed", { error: (e as Error).message });
+            res.status(500).json({ message: "Could not load order" });
+        }
+    };
+
+    /** GET /shop/shipping-countries - so the storefront can say where it ships. */
+    getShippingCountries = async (_req: Request, res: Response) => {
+        try {
+            res.json({ countries: await this.checkout.allowedCountries() });
+        } catch (e) {
+            log.error("getShippingCountries failed", { error: (e as Error).message });
+            res.status(500).json({ message: "Could not load shipping countries" });
+        }
+    };
 
     listProducts = async (req: Request, res: Response) => {
         try {

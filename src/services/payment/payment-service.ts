@@ -1102,6 +1102,43 @@ export class PaymentService {
                 await new PayoutService().handleConnectAccountUpdated(event.data.object as any);
                 break;
             }
+            // Shop orders settle through Stripe hosted Checkout, which is a
+            // different event from the app's PaymentIntent flow. Keyed on
+            // metadata.shopOrderId so it can never collide with a delivery
+            // payment, and markPaid is idempotent because Stripe retries.
+            case "checkout.session.completed":
+            case "checkout.session.async_payment_succeeded": {
+                const session = event.data.object;
+                const shopOrderId = session.metadata?.shopOrderId;
+                if (shopOrderId && session.payment_status === "paid") {
+                    const { ShopCheckoutService } = await import("../shop/shop-checkout-service");
+                    await new ShopCheckoutService().markPaid({
+                        shopOrderId,
+                        paymentIntentId: typeof session.payment_intent === "string"
+                            ? session.payment_intent
+                            : session.payment_intent?.id,
+                        amountTotal: typeof session.amount_total === "number"
+                            ? session.amount_total / 100
+                            : null,
+                        shippingAddress:
+                            session.collected_information?.shipping_details ||
+                            session.shipping_details ||
+                            null,
+                        email: session.customer_details?.email || null,
+                    });
+                }
+                break;
+            }
+            case "checkout.session.async_payment_failed":
+            case "checkout.session.expired": {
+                const session = event.data.object;
+                const shopOrderId = session.metadata?.shopOrderId;
+                if (shopOrderId) {
+                    const { ShopCheckoutService } = await import("../shop/shop-checkout-service");
+                    await new ShopCheckoutService().markFailed(shopOrderId, event.type);
+                }
+                break;
+            }
             case "payment_intent.succeeded": {
                 const pi = event.data.object;
                 const paymentId = pi.metadata?.paymentId;

@@ -41,6 +41,16 @@ export class StripeProvider implements PaymentProvider {
         return this._stripe;
     }
 
+    /**
+     * The configured SDK client, for callers that need a Stripe feature this
+     * provider does not wrap. Shop checkout uses it for hosted Checkout
+     * sessions. Same lazy construction, so importing this file still does not
+     * require a key.
+     */
+    get client(): Stripe {
+        return this.stripe;
+    }
+
     // ── Payment Intent (Stripe's primary card flow) ──────────────────
 
     /**

@@ -1,6 +1,8 @@
 import { Request, Response } from "express";
 import { AppDataSource } from "../db/data-source";
 import { ShopProduct } from "../models/shop-product";
+import { ShopOrder, ShopOrderStatus, ShopFulfillmentStatus } from "../models/shop-order";
+import { Like } from "typeorm";
 import { CatalogSyncService } from "../services/shop/catalog-sync-service";
 import { zendropConfigured } from "../services/shop/zendrop-client";
 import { retailPriceFor } from "../config/shop-pricing";
@@ -18,6 +20,80 @@ export class AdminShopController {
     private sync = new CatalogSyncService();
     private applications = new MerchantApplicationService();
     private productRepo = () => AppDataSource.getRepository(ShopProduct);
+    private orderRepo = () => AppDataSource.getRepository(ShopOrder);
+
+    /**
+     * Orders placed on the public shop. Shown in full, including the email and
+     * address, because that is what support needs to answer "where is my
+     * parcel".
+     */
+    listOrders = async (req: Request, res: Response) => {
+        const page = Math.max(1, Number(req.query.page) || 1);
+        const limit = Math.min(200, Number(req.query.limit) || 50);
+        const where: any = {};
+        if (req.query.status) where.status = req.query.status as ShopOrderStatus;
+        if (req.query.fulfillmentStatus) where.fulfillmentStatus = req.query.fulfillmentStatus as ShopFulfillmentStatus;
+        if (req.query.search) where.orderNumber = Like(`%${String(req.query.search).toUpperCase()}%`);
+
+        const [orders, total] = await this.orderRepo().findAndCount({
+            where,
+            order: { createdAt: "DESC" },
+            skip: (page - 1) * limit,
+            take: limit,
+        });
+        res.json({ total, page, limit, orders });
+    };
+
+    /** Revenue at a glance, split by the two statuses that matter. */
+    orderSummary = async (_req: Request, res: Response) => {
+        const repo = this.orderRepo();
+        const row = await repo
+            .createQueryBuilder("o")
+            .select("COUNT(*)::int", "orders")
+            .addSelect("COUNT(*) FILTER (WHERE o.status = 'paid')::int", "paidOrders")
+            .addSelect("COALESCE(SUM(o.total) FILTER (WHERE o.status = 'paid'), 0)", "paidRevenue")
+            .addSelect("COUNT(*) FILTER (WHERE o.status = 'awaiting_payment')::int", "awaitingPayment")
+            .addSelect("COUNT(*) FILTER (WHERE o.status = 'paid' AND o.\"fulfillmentStatus\" = 'not_started')::int", "awaitingFulfilment")
+            .getRawOne();
+        res.json({
+            orders: Number(row?.orders || 0),
+            paidOrders: Number(row?.paidOrders || 0),
+            paidRevenue: Number(row?.paidRevenue || 0),
+            awaitingPayment: Number(row?.awaitingPayment || 0),
+            awaitingFulfilment: Number(row?.awaitingFulfilment || 0),
+        });
+    };
+
+    /**
+     * Move an order's fulfilment along by hand. Deliberately cannot touch
+     * `status`: whether the money arrived is Stripe's answer, not an admin's.
+     */
+    updateOrder = async (req: Request, res: Response) => {
+        const order = await this.orderRepo().findOne({ where: { id: req.params.id } });
+        if (!order) {
+            res.status(404).json({ message: "Order not found" });
+            return;
+        }
+        const next = req.body?.fulfillmentStatus;
+        if (next) {
+            if (!Object.values(ShopFulfillmentStatus).includes(next)) {
+                res.status(400).json({ message: "Unknown fulfilment status" });
+                return;
+            }
+            order.fulfillmentStatus = next;
+        }
+        if (req.body?.fulfillmentError !== undefined) {
+            order.fulfillmentError = req.body.fulfillmentError
+                ? String(req.body.fulfillmentError).slice(0, 500)
+                : null;
+        }
+        if (req.body?.shopifyOrderId !== undefined) {
+            order.shopifyOrderId = req.body.shopifyOrderId ? String(req.body.shopifyOrderId).slice(0, 100) : null;
+        }
+        await this.orderRepo().save(order);
+        log.info("Shop order updated by admin", { orderId: order.id, fulfillmentStatus: order.fulfillmentStatus });
+        res.json({ order });
+    };
 
     status = async (_req: Request, res: Response) => {
         const repo = this.productRepo();

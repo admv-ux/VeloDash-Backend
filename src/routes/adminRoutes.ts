@@ -1698,6 +1698,9 @@ router.patch("/shop/products/:id", adminRole, adminShopController.updateProduct)
 router.post("/shop/sync/categories", adminRole, adminShopController.syncCategories);
 router.post("/shop/sync/category/:categoryId", adminRole, adminShopController.syncCategory);
 router.post("/shop/reprice", adminRole, adminShopController.repriceAll);
+router.get("/shop/orders", adminRole, adminShopController.listOrders);
+router.get("/shop/orders/summary", adminRole, adminShopController.orderSummary);
+router.patch("/shop/orders/:id", adminRole, adminShopController.updateOrder);
 router.get("/shop/merchant-applications", adminRole, adminShopController.listApplications);
 router.patch("/shop/merchant-applications/:id", adminRole, adminShopController.updateApplication);
 

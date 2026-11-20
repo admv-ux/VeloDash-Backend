@@ -158,3 +158,100 @@ the registry cannot drift apart again.
   cluster already; without the repo secret the deploy simply leaves the
   cluster value alone, so nothing breaks, but it is not reproducible.
 - **rotate the Zendrop token.** It was shared in plain chat.
+
+
+## 2026-11-20: HTTPS, the storefront rebuild, and the fulfillment path
+
+### Domain and TLS, done
+
+`shopvelodash.com` A record now points at 162.35.106.11. Certificate
+issued for the apex and nginx redirects http to https:
+
+```
+http://shopvelodash.com   301 -> https://shopvelodash.com
+https://shopvelodash.com  200
+expires 2027-02-18, auto renewal scheduled
+```
+
+`www.shopvelodash.com` has **no DNS record**, so it was left off the
+certificate deliberately: including an unresolvable name fails the whole
+request. Add the `www` A record and the cert can be expanded.
+
+### Storefront home rebuilt as a shopping landing page
+
+`/` is now a landing page and browsing moved to `/browse`. Old links that
+carried filters on `/` redirect to `/browse` with their query intact, so
+nothing already shared breaks.
+
+New: rotating hero, category tiles built from real product images,
+horizontal product rails, add to basket from a card, recently viewed in
+localStorage, mobile bottom navigation and a filter drawer.
+
+Rails lower down skip products a rail above already showed. Without this,
+"New arrivals" and the Apparel rail rendered almost the same items,
+because the newest stock in a 148 product catalogue is all one category.
+Measured after the fix: 81 distinct products on the landing page, 10 of
+them appearing in more than one rail.
+
+Verified with 55 browser checks at 1440px and 390px, run twice: against
+the built bundle served under the production origin, and again against
+the live site after deploy. Both runs 55/55. Checks cover hero controls,
+rail scroll state, quick add and the basket badge, category and price
+filters, search result correctness, the legacy redirect, product detail,
+the more-in-category rail excluding the product being viewed, recently
+viewed, basket, merchant form, 404, console errors, failed requests and
+horizontal overflow. Separately: all 84 images on the landing page load,
+zero broken.
+
+### The Zendrop store is connected, and the fulfillment path is now known
+
+`get_stores` returns a store, so the earlier hard block is cleared:
+
+```
+id 3941837, "My Store", hgrv28-fx.myshopify.com, shopify, connection_status 1
+auto_fulfillment_enabled: false
+plan: Plus Monthly, 79 USD, active.  credit balance: 59 (promotional)
+```
+
+**There is no `create_order` tool.** All 38 MCP tools were enumerated.
+Zendrop can only *fulfill* orders it already holds, and it only holds
+orders that arrived from a connected store. So the Shopify bridge is
+mandatory, not a shortcut: Stripe payment in VeloDash, then a silent
+order POST to Shopify Admin API, then Zendrop ingests it, then
+`fulfill_order`.
+
+**A gap the Zendrop advice did not mention.** Posting an order to Shopify
+is not sufficient on its own. `fulfill_order` works on line items it can
+map back to catalogue products, which means each product must first be
+pushed into the store with `add_my_product` then `import_my_product`.
+Checked against the live data:
+
+```
+active catalogue rows                  148
+of those, already in the shopify store   0
+```
+
+The store holds 34 products, all `in_store`, and **not one of them is a
+product this shop sells**. So the chain is:
+
+1. `add_my_product(product_id, store_id)` for each product we list
+2. `import_my_product(import_list_id)`, async, poll
+   `get_my_product_import_operation`
+3. record the resulting Shopify variant id on our `shop_products` row
+4. on a paid Stripe order, POST to Shopify Admin API with those variants
+5. Zendrop ingests the order, it shows in `get_orders`
+6. `fulfill_order` with `confirmed=false` to preview cost, then
+   `confirmed=true` within 5 minutes to dispatch
+
+This also bounds the catalogue: we can only list what we have imported,
+and importing is rate limited the same way the catalogue sync is.
+
+### Still needs the owner
+
+- the Shopify Admin API token (`shpat_...`) and the store domain. Settings
+  then Apps and sales channels then Develop apps.
+- a decision on importing our 148 products into the Shopify store. That
+  writes to their real store, so it was not done unprompted.
+- add the `www.shopvelodash.com` A record if `www` should work.
+- `ZENDROP_API_ACCESS_TOKEN` as a GitHub repo secret.
+- **rotate the Zendrop token.** It was shared in plain chat.

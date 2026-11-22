@@ -202,6 +202,15 @@ export class AdminShopController {
                 categoryName: p.categoryName,
                 inStock: p.inStock,
                 isActive: p.isActive,
+                isFulfillable: p.isFulfillable,
+                shopifyProductId: p.shopifyProductId,
+                variants: (p.variants || []).map((v) => ({
+                    title: v.title,
+                    storeVariantId: v.storeVariantId,
+                    retail: v.retail,
+                    landedCost: v.landedCost,
+                    inStock: v.inStock,
+                })),
                 lastSyncedAt: p.lastSyncedAt,
             })),
         });

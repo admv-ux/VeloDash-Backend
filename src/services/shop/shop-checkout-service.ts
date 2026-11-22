@@ -1,6 +1,6 @@
 import Stripe from "stripe";
 import { AppDataSource } from "../../db/data-source";
-import { ShopProduct } from "../../models/shop-product";
+import { ShopProduct, ShopProductVariant } from "../../models/shop-product";
 import { ShopOrder, ShopOrderStatus, ShopOrderLine } from "../../models/shop-order";
 import { PlatformSettings } from "../../models/platform-settings";
 import { paymentProviderRegistry } from "../payment/payment-provider-registry";
@@ -23,6 +23,12 @@ export class CheckoutError extends Error {
 export interface CheckoutRequestLine {
     productId: string;
     quantity: number;
+    /**
+     * Shopify variant id. Optional only for a product with exactly one
+     * variant, where there is nothing to choose; anything with options must
+     * say which one, because guessing a size is worse than refusing.
+     */
+    variantId?: string;
 }
 
 /** Money in cents end to end, so no float ever reaches a total. */
@@ -72,11 +78,13 @@ export class ShopCheckoutService {
             throw new CheckoutError(`A basket can hold at most ${MAX_LINES} different products`);
         }
 
-        // Fold duplicates so the same product sent twice cannot slip past the
-        // per line quantity cap.
-        const wanted = new Map<string, number>();
+        // Fold duplicates so the same item sent twice cannot slip past the per
+        // line quantity cap. The key is product AND variant: two sizes of the
+        // same shirt are two different things to pick, pack and ship.
+        const wanted = new Map<string, { productId: string; variantId: string | null; quantity: number }>();
         for (const line of lines) {
             const id = String(line?.productId || "").trim();
+            const variantId = String(line?.variantId || "").trim() || null;
             // Rejected rather than floored: a fractional quantity means the
             // caller is confused, and quietly selling them a different number
             // of items than they asked for is not a kindness.
@@ -85,44 +93,83 @@ export class ShopCheckoutService {
             if (!Number.isInteger(qty) || qty < 1) {
                 throw new CheckoutError("Quantity must be a whole number of at least 1");
             }
-            wanted.set(id, (wanted.get(id) || 0) + qty);
+            if (variantId && !/^[0-9]{1,32}$/.test(variantId)) {
+                throw new CheckoutError("Unknown option in basket", 400);
+            }
+            const key = `${id}::${variantId || ""}`;
+            const prev = wanted.get(key);
+            if (prev) prev.quantity += qty;
+            else wanted.set(key, { productId: id, variantId, quantity: qty });
         }
-        for (const [id, qty] of wanted) {
-            if (qty > MAX_QUANTITY_PER_LINE) {
+        for (const line of wanted.values()) {
+            if (line.quantity > MAX_QUANTITY_PER_LINE) {
                 throw new CheckoutError(`You can order at most ${MAX_QUANTITY_PER_LINE} of any one item`, 400);
             }
-            if (!/^[0-9a-f-]{36}$/i.test(id)) throw new CheckoutError("Unknown product in basket", 400);
+            if (!/^[0-9a-f-]{36}$/i.test(line.productId)) {
+                throw new CheckoutError("Unknown product in basket", 400);
+            }
         }
 
+        const productIds = Array.from(new Set([...wanted.values()].map((l) => l.productId)));
         const products = await this.productRepo.find({
-            where: { id: In([...wanted.keys()]), isActive: true },
+            where: { id: In(productIds), isActive: true, isFulfillable: true },
         });
         const byId = new Map(products.map((p) => [p.id, p]));
 
         const items: ShopOrderLine[] = [];
         let subtotalCents = 0;
-        for (const [id, quantity] of wanted) {
-            const p = byId.get(id);
+        for (const line of wanted.values()) {
+            const p = byId.get(line.productId);
             if (!p) throw new CheckoutError("One of the items is no longer available", 409);
             if (!p.inStock) throw new CheckoutError(`"${p.name}" is out of stock`, 409);
 
-            const unitCents = cents(p.retailPrice);
+            const variant = this.resolveVariant(p, line.variantId);
+
+            const unitCents = cents(variant.retail);
             if (unitCents <= 0) throw new CheckoutError("One of the items is not priced", 409);
-            const lineCents = unitCents * quantity;
+            const lineCents = unitCents * line.quantity;
             subtotalCents += lineCents;
 
             items.push({
                 productId: p.id,
                 zendropProductId: p.zendropProductId,
+                variantId: variant.storeVariantId,
+                variantTitle: variant.title,
                 name: p.name,
-                image: p.image,
+                image: variant.image || p.image,
                 unitPrice: unitCents / 100,
-                quantity,
+                quantity: line.quantity,
                 lineTotal: lineCents / 100,
             });
         }
 
         return { items, subtotal: subtotalCents / 100 };
+    }
+
+    /**
+     * Pick the variant this line is for.
+     *
+     * A product with one variant needs no choice, so an absent variantId is
+     * fine there and only there. Anything with options is refused outright
+     * rather than defaulted: shipping the wrong size is a refund, a return
+     * and a lost customer, which is far worse than an error message.
+     */
+    private resolveVariant(p: ShopProduct, variantId: string | null): ShopProductVariant {
+        const variants = (p.variants || []).filter((v) => v && v.storeVariantId);
+        if (!variants.length) {
+            throw new CheckoutError(`"${p.name}" is not available to order right now`, 409);
+        }
+        if (variantId) {
+            const match = variants.find((v) => String(v.storeVariantId) === variantId);
+            if (!match) throw new CheckoutError(`That option of "${p.name}" is no longer available`, 409);
+            if (match.inStock === false) throw new CheckoutError(`"${p.name}" (${match.title}) is out of stock`, 409);
+            return match;
+        }
+        if (variants.length > 1) {
+            throw new CheckoutError(`Choose an option for "${p.name}" before checking out`, 400);
+        }
+        if (variants[0].inStock === false) throw new CheckoutError(`"${p.name}" is out of stock`, 409);
+        return variants[0];
     }
 
     /**

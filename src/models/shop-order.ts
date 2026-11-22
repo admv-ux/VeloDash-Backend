@@ -32,6 +32,14 @@ export enum ShopFulfillmentStatus {
 export interface ShopOrderLine {
     productId: string;
     zendropProductId: number;
+    /**
+     * Shopify variant id. This is the field fulfilment actually needs: Zendrop
+     * ships whatever variant the store order names, so an order that records
+     * only the product would get a random size sent.
+     */
+    variantId: string | null;
+    /** "Large / Black", kept so the order reads correctly after a re-sync. */
+    variantTitle: string | null;
     name: string;
     image: string | null;
     unitPrice: number;

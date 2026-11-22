@@ -8,6 +8,30 @@ import {
 } from "typeorm";
 
 /**
+ * One buyable variant: a size, a colour, or the single default variant of a
+ * product that has no options.
+ *
+ * `storeVariantId` is the Shopify variant id and is the only field that can
+ * actually place an order. Zendrop fulfils from the connected store, and
+ * `fulfill_order` matches our line items back to store variants, so a variant
+ * without this id is a variant we can display but never ship.
+ */
+export interface ShopProductVariant {
+    /** Supplier SKU. The join key between Zendrop's catalogue and the store. */
+    sku: string | null;
+    title: string;
+    /** Shopify variant id. Required to place and fulfil an order. */
+    storeVariantId: string;
+    zendropVariantId: number | null;
+    wholesale: number;
+    /** wholesale + the product's US shipping quote. */
+    landedCost: number;
+    retail: number;
+    image: string | null;
+    inStock: boolean;
+}
+
+/**
  * A Zendrop catalogue item mirrored locally.
  *
  * Zendrop's catalogue API answers in 5 to 11 seconds, so the storefront can
@@ -30,6 +54,35 @@ export class ShopProduct {
     @Column({ type: "integer", unique: true })
     @Index()
     zendropProductId: number;
+
+    // ── link to the connected Shopify store ───────────────────────────
+    /**
+     * Shopify product id, set once the product exists in the connected store.
+     *
+     * Null means Zendrop cannot ship it: it only fulfils orders that arrive
+     * from a connected store. The shop therefore lists only rows that have
+     * this, which is why `isFulfillable` gates every storefront query.
+     */
+    @Column({ type: "varchar", length: 64, nullable: true })
+    @Index()
+    shopifyProductId: string | null;
+
+    /** Zendrop import-list id, the handle for re-reading the variant mapping. */
+    @Column({ type: "integer", nullable: true })
+    importListId: number | null;
+
+    /** Buyable variants with their Shopify ids. Empty until the store sync runs. */
+    @Column({ type: "jsonb", default: () => "'[]'::jsonb" })
+    variants: ShopProductVariant[];
+
+    /**
+     * True only when the product is in the store AND priced AND has at least
+     * one variant we can order. Everything the storefront shows is gated on
+     * this, so we can never sell something we cannot ship.
+     */
+    @Column({ type: "boolean", default: false })
+    @Index()
+    isFulfillable: boolean;
 
     @Column({ type: "varchar", length: 500 })
     name: string;

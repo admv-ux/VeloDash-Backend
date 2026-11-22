@@ -6,10 +6,17 @@ import { ShopOrderStatus } from "../src/models/shop-order";
  * into a charge, so the only thing standing between a shopper and a price of
  * their own choosing is that prices are recomputed here.
  */
+const v = (storeVariantId: string, title: string, retail: number, inStock = true) =>
+    ({ sku: null, title, storeVariantId, zendropVariantId: null, wholesale: 1, landedCost: 2, retail, image: null, inStock });
+
 const PRODUCTS: any[] = [
-    { id: "11111111-1111-1111-1111-111111111111", zendropProductId: 1, name: "Cheap thing", image: "a.webp", retailPrice: "9.99", isActive: true, inStock: true },
-    { id: "22222222-2222-2222-2222-222222222222", zendropProductId: 2, name: "Dear thing", image: null, retailPrice: "74.99", isActive: true, inStock: true },
-    { id: "33333333-3333-3333-3333-333333333333", zendropProductId: 3, name: "Gone thing", image: null, retailPrice: "19.99", isActive: true, inStock: false },
+    { id: "11111111-1111-1111-1111-111111111111", zendropProductId: 1, name: "Cheap thing", image: "a.webp", retailPrice: "9.99", isActive: true, isFulfillable: true, inStock: true, variants: [v("901", "Default", 9.99)] },
+    { id: "22222222-2222-2222-2222-222222222222", zendropProductId: 2, name: "Dear thing", image: null, retailPrice: "74.99", isActive: true, isFulfillable: true, inStock: true, variants: [v("902", "Default", 74.99)] },
+    { id: "33333333-3333-3333-3333-333333333333", zendropProductId: 3, name: "Gone thing", image: null, retailPrice: "19.99", isActive: true, isFulfillable: true, inStock: false, variants: [v("903", "Default", 19.99)] },
+    // Options, so there is something real to choose wrongly.
+    { id: "44444444-4444-4444-4444-444444444444", zendropProductId: 4, name: "Sized thing", image: null, retailPrice: "29.99", isActive: true, isFulfillable: true, inStock: true, variants: [v("941", "Small", 29.99), v("942", "Large", 39.99), v("943", "XL", 49.99, false)] },
+    // In the store but with nothing orderable left in it.
+    { id: "55555555-5555-5555-5555-555555555555", zendropProductId: 5, name: "Variantless thing", image: null, retailPrice: "14.99", isActive: true, isFulfillable: true, inStock: true, variants: [] },
 ];
 
 function buildService(opts: { countries?: string } = {}) {
@@ -18,7 +25,7 @@ function buildService(opts: { countries?: string } = {}) {
     (svc as any).productRepo = {
         find: jest.fn().mockImplementation(async ({ where }: any) => {
             const ids: string[] = where.id?._value || where.id?.value || [];
-            return PRODUCTS.filter((p) => ids.includes(p.id) && p.isActive);
+            return PRODUCTS.filter((p) => ids.includes(p.id) && p.isActive && p.isFulfillable);
         }),
     };
     (svc as any).orderRepo = {
@@ -36,6 +43,91 @@ const line = (id: string, quantity = 1) => ({ productId: id, quantity });
 const CHEAP = PRODUCTS[0].id;
 const DEAR = PRODUCTS[1].id;
 const OOS = PRODUCTS[2].id;
+const SIZED = PRODUCTS[3].id;
+const NO_VARIANTS = PRODUCTS[4].id;
+
+
+/**
+ * Variants are where a dropshipped order goes wrong quietly: the money is
+ * right, the parcel is the wrong size. The Shopify variant id is the only
+ * thing Zendrop fulfils against, so these guard that it is always recorded
+ * and always the one the shopper picked.
+ */
+describe("variants", () => {
+    it("records the Shopify variant id on the line, which is what fulfilment needs", async () => {
+        const { svc } = buildService();
+        const q = await svc.quote([{ productId: SIZED, quantity: 1, variantId: "942" }]);
+        expect(q.items[0].variantId).toBe("942");
+        expect(q.items[0].variantTitle).toBe("Large");
+        expect(q.items[0].unitPrice).toBe(39.99);
+    });
+
+    it("refuses to guess when a product has options and none was chosen", async () => {
+        const { svc } = buildService();
+        await expect(svc.quote([line(SIZED, 1)])).rejects.toThrow(/Choose an option/);
+    });
+
+    it("needs no choice when there is only one variant", async () => {
+        const { svc } = buildService();
+        const q = await svc.quote([line(CHEAP, 1)]);
+        expect(q.items[0].variantId).toBe("901");
+    });
+
+    it("rejects a variant that does not belong to the product", async () => {
+        const { svc } = buildService();
+        await expect(
+            svc.quote([{ productId: SIZED, quantity: 1, variantId: "901" }]),
+        ).rejects.toThrow(/no longer available/);
+    });
+
+    it("rejects an out of stock variant even though the product is in stock", async () => {
+        const { svc } = buildService();
+        await expect(
+            svc.quote([{ productId: SIZED, quantity: 1, variantId: "943" }]),
+        ).rejects.toThrow(/out of stock/);
+    });
+
+    it("prices each variant on its own, not on the product's from price", async () => {
+        const { svc } = buildService();
+        const q = await svc.quote([
+            { productId: SIZED, quantity: 1, variantId: "941" },
+            { productId: SIZED, quantity: 1, variantId: "942" },
+        ]);
+        expect(q.items).toHaveLength(2);
+        expect(q.subtotal).toBe(69.98);
+    });
+
+    it("counts two sizes of one product as two lines, not a folded duplicate", async () => {
+        const { svc } = buildService();
+        const q = await svc.quote([
+            { productId: SIZED, quantity: 6, variantId: "941" },
+            { productId: SIZED, quantity: 6, variantId: "942" },
+        ]);
+        expect(q.items).toHaveLength(2);
+    });
+
+    it("still folds the same variant sent twice, so the cap holds", async () => {
+        const { svc } = buildService();
+        await expect(
+            svc.quote([
+                { productId: SIZED, quantity: 6, variantId: "941" },
+                { productId: SIZED, quantity: 6, variantId: "941" },
+            ]),
+        ).rejects.toThrow(/at most/);
+    });
+
+    it("refuses a product left with no orderable variant", async () => {
+        const { svc } = buildService();
+        await expect(svc.quote([line(NO_VARIANTS, 1)])).rejects.toThrow(/not available to order/);
+    });
+
+    it("rejects a malformed variant id outright", async () => {
+        const { svc } = buildService();
+        await expect(
+            svc.quote([{ productId: SIZED, quantity: 1, variantId: "941 OR 1=1" }]),
+        ).rejects.toThrow(/Unknown option/);
+    });
+});
 
 describe("quote", () => {
     it("prices from our own records, ignoring anything the client sent", async () => {

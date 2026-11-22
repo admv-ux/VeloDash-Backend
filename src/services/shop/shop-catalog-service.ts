@@ -1,10 +1,16 @@
 import { AppDataSource } from "../../db/data-source";
-import { ShopProduct } from "../../models/shop-product";
+import { ShopProduct, ShopProductVariant } from "../../models/shop-product";
 import { ShopCategory } from "../../models/shop-category";
 
 /**
  * Reads the mirrored catalogue. Everything here hits our own Postgres, never
  * Zendrop, because upstream takes 5 to 11 seconds per call.
+ *
+ * Every query is gated on BOTH isActive and isFulfillable. isActive is the
+ * admin's switch; isFulfillable is the sync's answer to "does this exist in
+ * the Shopify store Zendrop ships from". Listing a product that fails the
+ * second one means taking money for a parcel that can never be dispatched,
+ * so the gate lives here rather than in each caller.
  */
 
 export interface CatalogQuery {
@@ -29,6 +35,17 @@ export interface CatalogItem {
     categoryName: string | null;
     inStock: boolean;
     estimatedDelivery: string | null;
+    /** Cheapest-first. One entry means the product has no options to choose. */
+    variants: CatalogVariantItem[];
+}
+
+/** A variant as the shopper sees it. Cost and the Shopify id stay server side. */
+export interface CatalogVariantItem {
+    id: string;
+    title: string;
+    price: number;
+    image: string | null;
+    inStock: boolean;
 }
 
 const MAX_LIMIT = 60;
@@ -45,7 +62,27 @@ function toItem(p: ShopProduct): CatalogItem {
         categoryName: p.categoryName,
         inStock: p.inStock,
         estimatedDelivery: p.estimatedDelivery,
+        variants: toVariants(p.variants),
     };
+}
+
+/**
+ * The Shopify variant id doubles as the public variant id. It is not a
+ * secret: it appears in any Shopify storefront, and using it directly means
+ * the basket carries the exact id that fulfilment needs, with no second
+ * lookup table to drift out of step.
+ */
+function toVariants(variants: ShopProductVariant[] | null): CatalogVariantItem[] {
+    return (variants || [])
+        .filter((v) => v && v.storeVariantId)
+        .map((v) => ({
+            id: v.storeVariantId,
+            title: v.title,
+            price: Number(v.retail),
+            image: v.image,
+            inStock: v.inStock !== false,
+        }))
+        .sort((a, b) => a.price - b.price);
 }
 
 export class ShopCatalogService {
@@ -62,7 +99,7 @@ export class ShopCatalogService {
         const limit = Math.min(MAX_LIMIT, Math.max(1, Number(query.limit) || 24));
 
         const qb = this.productRepo.createQueryBuilder("p")
-            .where("p.isActive = true");
+            .where("p.isActive = true AND p.isFulfillable = true");
 
         if (query.search) {
             qb.andWhere("p.name ILIKE :search", { search: `%${query.search}%` });
@@ -91,7 +128,7 @@ export class ShopCatalogService {
     }
 
     async getById(id: string): Promise<(CatalogItem & { description: string | null }) | null> {
-        const p = await this.productRepo.findOne({ where: { id, isActive: true } });
+        const p = await this.productRepo.findOne({ where: { id, isActive: true, isFulfillable: true } });
         if (!p) return null;
         return { ...toItem(p), description: p.description };
     }
@@ -103,7 +140,7 @@ export class ShopCatalogService {
             .createQueryBuilder("p")
             .select("p.categoryId", "categoryId")
             .addSelect("COUNT(*)::int", "count")
-            .where("p.isActive = true")
+            .where("p.isActive = true AND p.isFulfillable = true")
             .groupBy("p.categoryId")
             .getRawMany();
         const byId = new Map(counts.map(c => [Number(c.categoryId), Number(c.count)]));
@@ -112,13 +149,36 @@ export class ShopCatalogService {
             .filter(c => c.count > 0);
     }
 
+    /**
+     * Where the sellable stock physically ships from, counted rather than
+     * assumed.
+     *
+     * The shop quotes one delivery estimate per product, but the honest
+     * version of "how long and from where" is a question about the whole
+     * catalogue, and the answer changes as the store changes. Counting it
+     * here keeps the shipping page truthful without anyone remembering to
+     * edit it.
+     */
+    async origins(): Promise<{ country: string; count: number }[]> {
+        const rows = await this.productRepo
+            .createQueryBuilder("p")
+            .select("p.shipsFrom", "country")
+            .addSelect("COUNT(*)::int", "count")
+            .where("p.isActive = true AND p.isFulfillable = true")
+            .andWhere("p.shipsFrom IS NOT NULL")
+            .groupBy("p.shipsFrom")
+            .orderBy("COUNT(*)", "DESC")
+            .getRawMany();
+        return rows.map((r) => ({ country: String(r.country).toUpperCase(), count: Number(r.count) }));
+    }
+
     /** The price slider needs real bounds, not guessed ones. */
     async priceRange(): Promise<{ min: number; max: number }> {
         const row = await this.productRepo
             .createQueryBuilder("p")
             .select("MIN(p.retailPrice)", "min")
             .addSelect("MAX(p.retailPrice)", "max")
-            .where("p.isActive = true")
+            .where("p.isActive = true AND p.isFulfillable = true")
             .getRawOne();
         return { min: Number(row?.min || 0), max: Number(row?.max || 0) };
     }

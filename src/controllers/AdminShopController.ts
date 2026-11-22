@@ -4,6 +4,7 @@ import { ShopProduct } from "../models/shop-product";
 import { ShopOrder, ShopOrderStatus, ShopFulfillmentStatus } from "../models/shop-order";
 import { Like } from "typeorm";
 import { CatalogSyncService } from "../services/shop/catalog-sync-service";
+import { StoreSyncService } from "../services/shop/store-sync-service";
 import { zendropConfigured } from "../services/shop/zendrop-client";
 import { retailPriceFor } from "../config/shop-pricing";
 import { MerchantApplicationService, MerchantApplicationError } from "../services/shop/merchant-application-service";
@@ -18,6 +19,7 @@ const log = logger.child({ controller: "AdminShop" });
  */
 export class AdminShopController {
     private sync = new CatalogSyncService();
+    private storeSync = new StoreSyncService();
     private applications = new MerchantApplicationService();
     private productRepo = () => AppDataSource.getRepository(ShopProduct);
     private orderRepo = () => AppDataSource.getRepository(ShopOrder);
@@ -97,14 +99,19 @@ export class AdminShopController {
 
     status = async (_req: Request, res: Response) => {
         const repo = this.productRepo();
-        const [total, active] = await Promise.all([
+        const [total, active, fulfillable] = await Promise.all([
             repo.count(),
             repo.count({ where: { isActive: true } }),
+            repo.count({ where: { isActive: true, isFulfillable: true } }),
         ]);
         const last = await repo.findOne({ where: {}, order: { lastSyncedAt: "DESC" } });
         res.json({
             configured: zendropConfigured(),
-            products: { total, active, hidden: total - active },
+            // `sellable` is the number the storefront actually shows. It is
+            // separate from `active` because a product can be switched on here
+            // and still be unshippable, which is exactly the gap that let the
+            // shop list 148 products it could not dispatch one of.
+            products: { total, active, sellable: fulfillable, unsellable: active - fulfillable, hidden: total - active },
             lastSyncedAt: last?.lastSyncedAt ?? null,
         });
     };
@@ -138,6 +145,34 @@ export class AdminShopController {
             res.json(await this.sync.syncCategoryPage(categoryId, page, limit));
         } catch (e) {
             log.error("syncCategory failed", { categoryId, error: (e as Error).message });
+            res.status(502).json({ message: (e as Error).message });
+        }
+    };
+
+    /**
+     * Re-read the connected Shopify store and re-price everything in it.
+     *
+     * This is the sync that decides what the shop can sell. `limit` runs a
+     * partial pass for a quick check; a pass without one is the only kind
+     * allowed to delist, since a partial pass has not seen every product.
+     *
+     * Slow on purpose: Zendrop rate limits a sustained run, so the service
+     * paces itself and a full pass over ~125 products takes several minutes.
+     */
+    syncStore = async (req: Request, res: Response) => {
+        if (!zendropConfigured()) {
+            res.status(503).json({ message: "Zendrop is not configured" });
+            return;
+        }
+        const limit = req.query.limit === undefined ? undefined : Number(req.query.limit);
+        if (limit !== undefined && (!Number.isInteger(limit) || limit < 1)) {
+            res.status(400).json({ message: "limit must be a positive integer" });
+            return;
+        }
+        try {
+            res.json(await this.storeSync.syncStore(limit));
+        } catch (e) {
+            log.error("syncStore failed", { error: (e as Error).message });
             res.status(502).json({ message: (e as Error).message });
         }
     };

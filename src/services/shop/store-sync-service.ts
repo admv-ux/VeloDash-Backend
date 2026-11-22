@@ -1,5 +1,6 @@
 import { AppDataSource } from "../../db/data-source";
 import { ShopProduct, ShopProductVariant } from "../../models/shop-product";
+import { ShopCategory } from "../../models/shop-category";
 import { callZendropTool, zendropConfigured } from "./zendrop-client";
 import { retailPriceFor } from "../../config/shop-pricing";
 import logger from "../../utils/logger";
@@ -109,6 +110,7 @@ function variantTitle(cv: CatalogVariant | undefined, sv: StoreVariant, fallback
 
 export class StoreSyncService {
     private productRepo = AppDataSource.getRepository(ShopProduct);
+    private categoryRepo = AppDataSource.getRepository(ShopCategory);
 
     get configured(): boolean {
         return zendropConfigured();
@@ -194,6 +196,39 @@ export class StoreSyncService {
         return { variants, dropped };
     }
 
+    /**
+     * Record the product's category and mark it carried.
+     *
+     * The storefront only offers categories flagged `isCarried`, and the
+     * category tree is mirrored by a different job that may not have run. So
+     * the row is created here if it is missing: otherwise a product synced
+     * from the store lands with a category nothing will ever show it under,
+     * and the whole category filter comes back empty.
+     */
+    private async applyCategory(row: ShopProduct, categories?: { id: number; name: string }[]): Promise<void> {
+        const first = (categories || [])[0];
+        if (!first?.id) return;
+
+        row.categoryId = first.id;
+        row.categoryName = first.name || null;
+
+        let category = await this.categoryRepo.findOne({ where: { zendropCategoryId: first.id } });
+        if (!category) {
+            category = this.categoryRepo.create({
+                zendropCategoryId: first.id,
+                name: first.name || `Category ${first.id}`,
+                parentId: null,
+                productCount: 0,
+            });
+        }
+        if (!category.isCarried) {
+            category.isCarried = true;
+            await this.categoryRepo.save(category);
+        } else if (!category.id) {
+            await this.categoryRepo.save(category);
+        }
+    }
+
     /** Cheapest US shipping option, or null when Zendrop will not ship it there. */
     private async shippingFor(productId: number): Promise<{ cost: number; eta: string | null } | null> {
         const res = await callZendropTool<{
@@ -229,6 +264,7 @@ export class StoreSyncService {
             images?: { id: number; url: string }[];
             price: string | number;
             availability?: { in_stock?: boolean };
+            categories?: { id: number; name: string }[];
             variants?: CatalogVariant[];
             supplier?: { name?: string; country?: string };
         }>("get_catalog_product", { product_id: entry.product_id });
@@ -249,6 +285,7 @@ export class StoreSyncService {
         row.shopifyProductId = mine?.store_product_id ? String(mine.store_product_id) : null;
         row.inStock = cat?.availability?.in_stock !== false;
         row.lastSyncedAt = new Date();
+        await this.applyCategory(row, cat?.categories);
 
         // No US shipping quote means no landed cost, and a product priced on a
         // guessed shipping cost is how you sell below cost. Keep the row for

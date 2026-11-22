@@ -132,9 +132,16 @@ describe("syncOne", () => {
             create: jest.fn().mockImplementation((d: any) => ({ ...d })),
             save: jest.fn().mockImplementation(async (r: any) => { saved.push({ ...r }); return r; }),
         };
+        const categories: any[] = [];
+        (s as any).categoryRepo = {
+            findOne: jest.fn().mockResolvedValue(null),
+            create: jest.fn().mockImplementation((d: any) => ({ ...d })),
+            save: jest.fn().mockImplementation(async (c: any) => { categories.push({ ...c }); return c; }),
+        };
+        (harness as any).categories = categories;
         jest.spyOn(require("../src/services/shop/zendrop-client"), "callZendropTool")
             .mockImplementation(async (tool: any) => responses[tool as string]);
-        return { s, saved };
+        return { s, saved, categories };
     }
 
     afterEach(() => jest.restoreAllMocks());
@@ -169,6 +176,27 @@ describe("syncOne", () => {
         const { s, saved } = harness({ ...linked, get_my_product: { ...linked.get_my_product, store_product_id: null } });
         await expect(s.syncOne(entry as any)).resolves.toBe(false);
         expect(saved[0].isFulfillable).toBe(false);
+    });
+
+    it("records the category and marks it carried, or the filter comes back empty", async () => {
+        const { s, saved, categories } = harness({
+            ...linked,
+            get_catalog_product: { ...linked.get_catalog_product, categories: [{ id: 13, name: "Jewelry" }] },
+        });
+        await s.syncOne(entry as any);
+        expect(saved[0].categoryId).toBe(13);
+        expect(saved[0].categoryName).toBe("Jewelry");
+        expect(categories[0]).toMatchObject({ zendropCategoryId: 13, name: "Jewelry", isCarried: true });
+    });
+
+    it("leaves the category alone when Zendrop gives none", async () => {
+        const { s, saved, categories } = harness({
+            ...linked,
+            get_catalog_product: { ...linked.get_catalog_product, categories: [] },
+        });
+        await s.syncOne(entry as any);
+        expect(saved[0].categoryId).toBeUndefined();
+        expect(categories).toHaveLength(0);
     });
 
     it("lists at the cheapest variant, so the grid never undercuts the detail page", async () => {

@@ -385,3 +385,159 @@ bounds. Worth a look next time you are signed in.
 2. **The Shopify Admin API token** (`shpat_...`), still outstanding.
 3. `ZENDROP_API_ACCESS_TOKEN` as a GitHub repo secret.
 4. The `www.shopvelodash.com` A record, if `www` should resolve.
+
+---
+
+## 2026-11-22: the store, not the catalogue, decides what we sell
+
+### The 148 was never a Zendrop limit
+
+The question was whether Zendrop had only given us 148 products. They had
+not. Measured against the live tables:
+
+| | |
+|---|---|
+| Zendrop categories mirrored | 230 |
+| Products visible across them | **1,297,745** |
+| Categories we had ever pulled from | 3 |
+| Products we held | 148 |
+
+The ceiling was ours. `shop-catalog-sync.ts` takes **one page of 50 from one
+category per 15 minute tick**, only for categories holding 500+ products,
+and `syncCategoryPage` marks a category carried as soon as its first page
+saves. So each category contributes 50 products once and is never revisited:
+67 eligible categories put a hard ceiling of ~3,350 on the whole shop, and
+the job is off by default anyway. The 148 is 50 + 50 + 48, three categories,
+two products dropped for having no shipping quote.
+
+Separately, the Shopify Storefront pagination theory does not apply: the
+store answers in a single page and `hasNextPage` is false. The sync written
+here pages properly regardless, but there was nothing past page one.
+
+### The thing that actually mattered: zero overlap
+
+The 148 products on the site and the 119 in the Shopify store were
+**completely disjoint sets**. Not partially; the intersection was empty.
+
+That is worse than it sounds. Zendrop has no `create_order` and only fulfils
+orders arriving from a connected store, matching line items back to store
+products. So every one of the 148 products the shop was selling was
+unshippable, and the ~125 that could be shipped were not on the site.
+
+So the model is inverted: **the store is the source of truth for what we
+offer**, and the catalogue is consulted only for the one thing the store
+cannot tell us, which is what the item costs us.
+
+### StoreSyncService
+
+`src/services/shop/store-sync-service.ts`. Per product:
+
+1. `get_my_products` (paged, 60 max per page) for the import list.
+2. `get_my_product` for the Shopify product id and the variant map.
+3. `get_catalog_product` for wholesale cost and the catalogue variants.
+4. `get_catalog_shipping_estimate` (US) for the landed cost.
+5. Our own markup via `retailPriceFor`, per variant.
+
+`isFulfillable` is set only when the product is in the store, `store_sync_status`
+is `synced`, a US shipping quote exists and at least one variant survives
+pricing. Every catalogue read is gated on it, so the shop cannot list what it
+cannot ship. A full pass also delists anything that has left the store; a
+partial pass may not, because it has not seen the products it did not reach.
+
+**All read-only tools.** This does not need `my_products:write`, which is why
+it could be built and run while that scope is still missing.
+
+#### Rate limiting is sustained, not burst
+
+Six concurrent calls got 95 of 125 products served a Cloudflare 429
+challenge, and the block persisted for minutes afterwards. The service runs
+strictly serially with a 1.2s gap. A full pass over ~125 products is about
+three hundred upstream calls and takes roughly ten minutes. That is the
+correct trade, not a bug.
+
+### Variants
+
+87 of the 119 store products have options, up to 20 of them. The old model
+had one price per product and no variant concept at all, so an order would
+have named a product and let the supplier pick a size.
+
+- `ShopProduct.variants` holds the Shopify variant id, SKU, title, wholesale,
+  landed cost and retail per variant.
+- Store and catalogue variants are joined **on SKU**, the one field both
+  carry from the same supplier record. A missing or duplicated SKU falls back
+  to position; a variant that cannot be priced is dropped, not guessed.
+- Order lines carry `variantId`, which is what fulfilment actually needs.
+- A product with options is **refused** at checkout if no variant was chosen.
+  Shipping the wrong size is a refund, a return and a lost customer.
+- The listed price is the cheapest variant, so the grid never undercuts the
+  detail page.
+
+#### The $52,257.76 sweater
+
+Zendrop pushed a variant of "Vintage Men's Color Block Knit Sweater" to the
+store at $52,257.76. Marked up it would have been a five figure listing one
+accidental purchase away from a real loss. Variants above a $2,000 sanity
+ceiling are dropped and the rest of the product still sells.
+
+### Shipping, customs and honest copy
+
+The home page paired a globe icon and "Delivered to your door" with "We ship
+to United States", which reads as a worldwide promise next to a checkout
+that takes US addresses only.
+
+Measured, not assumed: of a 30 product sample, **28 ship from China** (8 day
+US estimate) and 2 from a US Amazon supplier (2 days). Zendrop returns an
+empty `shipping_options` array for Ghana on US-supplier items, so for part of
+the catalogue the answer is not "expensive", it is "no service".
+
+The US ended duty-free de minimis treatment for Chinese goods on 2 May 2025
+and for everywhere else on 29 August 2025, so low value parcels from abroad
+can now attract duty. A new `/shipping` page states where we ship, where
+stock ships from (counted live from `shipsFrom`, so it cannot drift), typical
+times, and the duty position.
+
+> **Policy written into the page, flag if you disagree:** the price at
+> checkout is the whole price including any import charge, and if a carrier
+> ever bills a customer duty we refund it. The alternative is a shopper
+> getting an unexpected bill at the door, which costs more in trust than the
+> duty costs in cash. Changing it means editing `src/pages/Shipping.jsx` and
+> the Terms.
+
+### velocouriersvc.com
+
+Four legal documents were live at once with two different "last updated"
+dates and two different sets of terms: `/legal/terms/` and `/privacy/` (April
+25), `/terms.html` and `/privacy.html` (January 1). Which governed was
+anyone's guess. `/legal/privacy` was a 404 and was linked from the live shop
+footer; `/terms/` was a 404 too.
+
+Done locally, **not deployed**: the site is on cPanel shared hosting at
+66.29.148.143, not our VPS, and there are no credentials for it in the repo.
+
+- `/legal/terms/` is now canonical Terms, dated today, with a new section 9
+  covering sale of goods: who you buy from, not a courier delivery, price
+  includes duty, where we deliver, delivery estimates, pricing errors,
+  cancellations and returns, Stripe.
+- `/privacy/` is canonical Privacy, keeping the `#terms` anchor the shipped
+  mobile apps deep-link to. Adds Stripe, Shopify and Zendrop as named
+  processors and is explicit that a shop order sends the delivery address
+  abroad. The flat "three months after termination" retention claim was wrong
+  for transaction records and now says so.
+- `.htaccess` redirects the duplicates to the canonical pair and 503s the
+  marketing site to `maintenance.html`, while leaving `/privacy`, `/legal`,
+  `/support`, `/.well-known` and static assets reachable, because the store
+  listings and the shop link straight at them.
+
+The shop footer now points at `/privacy/` and `/legal/terms/`, which exist.
+
+### Still needs the owner
+
+1. **cPanel or FTP access for velocouriersvc.com**, or upload the prepared
+   files yourself. Nothing in that folder is deployed.
+2. **A Zendrop token with write scopes** (`orders:write` for `fulfill_order`),
+   which also rotates the leaked one. `my_products:write` is no longer needed
+   for the catalogue, only for pushing new products from our side.
+3. **The Shopify Admin API token** (`shpat_...`), to post paid orders into the
+   store so Zendrop ingests them.
+4. `ZENDROP_API_ACCESS_TOKEN` as a GitHub repo secret.
+5. The `www.shopvelodash.com` A record, if `www` should resolve.

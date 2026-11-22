@@ -38,6 +38,26 @@ function cents(amount: number): number {
 }
 
 /**
+ * "Australia", not "AU". This name is read by the shopper on Stripe's page,
+ * and a two letter code there looks like a bug rather than a destination.
+ */
+const REGION_NAMES = (() => {
+    try {
+        return new Intl.DisplayNames(["en"], { type: "region" });
+    } catch {
+        return null;
+    }
+})();
+
+function countryLabel(code: string): string {
+    try {
+        return REGION_NAMES?.of(code) || code;
+    } catch {
+        return code;
+    }
+}
+
+/**
  * Short, unambiguous order code. Excludes the characters people misread when
  * they read a code down the phone to support.
  */
@@ -246,7 +266,15 @@ export class ShopCheckoutService {
         successUrl: string;
         cancelUrl: string;
         country?: string;
-    }): Promise<{ orderId: string; orderNumber: string; total: number; checkoutUrl: string }> {
+    }): Promise<{
+        orderId: string;
+        orderNumber: string;
+        subtotal: number;
+        shippingTotal: number;
+        total: number;
+        country: string;
+        checkoutUrl: string;
+    }> {
         const country = await this.resolveCountry(params.country);
         const { items, subtotal, shippingTotal, total } = await this.quote(params.lines, country);
 
@@ -291,7 +319,7 @@ export class ShopCheckoutService {
                             price_data: {
                                 currency: "usd" as const,
                                 unit_amount: cents(shippingTotal),
-                                product_data: { name: `International shipping to ${country}` },
+                                product_data: { name: `Shipping to ${countryLabel(country)}` },
                             },
                         }]
                         : []),
@@ -334,7 +362,13 @@ export class ShopCheckoutService {
         return {
             orderId: order.id,
             orderNumber: order.orderNumber,
-            total: subtotal,
+            // The charge, not the goods. This read `subtotal`, which was the
+            // same number back when shipping was always zero and silently
+            // became wrong the moment a destination could add to it.
+            subtotal,
+            shippingTotal,
+            total,
+            country,
             checkoutUrl: session.url || "",
         };
     }

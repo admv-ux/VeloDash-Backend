@@ -389,6 +389,17 @@ describe("destination pricing", () => {
         await expect(svc.resolveCountry("'; DROP TABLE--")).resolves.toBe("US");
     });
 
+    it("reports the charge, not the goods, when a destination adds shipping", async () => {
+        // This returned `subtotal`, which was identical to the total back
+        // when shipping was always zero and quietly became a lie once a
+        // destination could add to it.
+        const { svc } = withShipping({ "*": { cost: 12.39, eta: null } });
+        (svc as any).createStripeSession = undefined;
+        const q = await svc.quote([line(CHEAP, 1)], "AU");
+        expect(q.total).toBeGreaterThan(q.subtotal);
+        expect(q.total).toBeCloseTo(q.subtotal + q.shippingTotal, 2);
+    });
+
     it("accepts a country we do deliver to, in any case", async () => {
         const { svc } = buildService({ countries: "US,GB" });
         await expect(svc.resolveCountry("gb")).resolves.toBe("GB");

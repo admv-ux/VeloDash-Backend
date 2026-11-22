@@ -652,3 +652,88 @@ the money.
 
 So widening the shop to another country is a settings change plus correct
 prices, never a payment-provider limitation. The page now says so.
+
+---
+
+## 2026-11-22, later: worldwide delivery, priced per destination
+
+The owner's direction: deliver globally, to countries with dependable
+address systems.
+
+### Measured first
+
+27 candidates were quoted against six real products spanning the price range
+and both suppliers. The result decided the design:
+
+| | |
+|---|---|
+| Countries returning a quote for the main supplier | **27 of 27** |
+| Countries returning a quote for US-supplier items | **1 of 27** (the US) |
+| Destinations CHEAPER than the US | most of them |
+
+Sample spreads that killed the idea of one international fee:
+
+```
+Graphite case      US 4.58    AU 12.39   PL 2.56    (+7.81 worst)
+Leather jacket     US 44.77   GB 22.49   IL 71.99   (+27.22 worst)
+Oxygen tank        US 115.10  SG 29.91   IL 172.26  (+57.16 worst)
+```
+
+A flat surcharge would have overcharged Europe on the jacket and
+undercharged Israel by fifty seven dollars on the same day.
+
+### How it works
+
+`ShippingQuoteService` quotes per product per country. Retail prices already
+carry US shipping, so only the **difference** is charged, and a destination
+cheaper than the US costs the shopper nothing extra rather than earning an
+invented surcharge. Quotes are cached on the product, including a definite
+"ships nowhere there", because Zendrop takes half a second per call and rate
+limits sustained traffic. An upstream failure is never cached: a 429 is not
+an answer about where a supplier ships, and caching it would block a country
+for a fortnight.
+
+A basket containing something that cannot reach the destination is refused
+with **every** blocked item named at once, because roughly one product in
+fourteen here comes from a US-only supplier and discovering that one item per
+attempt is miserable.
+
+Stripe is sent `allowed_countries: [thatCountry]`, not the whole list, so a
+shopper cannot pick a destination we did not price.
+
+### Two bugs caught in verification
+
+**The cart showed the previous country's total while re-quoting.** React
+Query's `placeholderData` kept the old numbers on screen, so switching to
+Australia briefly displayed the US total as though it were the Australian
+one. It now shows "Checking" and greys the total until the new quote lands.
+
+**`createCheckout` returned `subtotal` as `total`.** Identical while shipping
+was always zero, wrong the moment a destination could add to it: the cart was
+told $37.98 for a $51.14 charge. The stored order and the Stripe session were
+both correct; only the response lied.
+
+### Verified live
+
+A real Australian session, read back from Stripe:
+
+```
+amount_total                5114
+shipping_address_collection {"allowed_countries": ["AU"]}
+line  "Mojiang Bear ... Peeler and Grater"   x2   3798
+line  Shipping to Australia                  x1   1316
+```
+
+284 backend tests across 27 suites. 56/56 and 19/19 browser checks on the
+live site, desktop and 390px, including a US-only item correctly blocking a
+German destination and naming itself.
+
+### Worth knowing
+
+- `platform_settings` holds **10 rows** and `allowedCountries()` reads one via
+  `findOne({ where: {} })`. All ten were set to the same list, so behaviour is
+  correct today, but the duplication is pre-existing and should be reconciled.
+- Two orders predate or sit outside these runs and were deliberately left:
+  `VD-FCVDJLRG` (payment_failed, $9.99, 2026-11-21) and one at 22:53 on
+  2026-11-22 for $61.99, both with no email and no money taken. They cannot be
+  told apart from a real shopper who did not finish paying.

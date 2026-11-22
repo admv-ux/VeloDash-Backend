@@ -48,6 +48,18 @@ const CALL_GAP_MS = Number(process.env.ZENDROP_CALL_GAP_MS) || 1200;
  */
 const MAX_SANE_RETAIL = 2000;
 
+/**
+ * Advisory lock key for a store sync.
+ *
+ * The API runs two replicas and both schedule the same pass, so without this
+ * the store gets synced twice at once: the same rows written twice for no
+ * benefit, and, far worse, double the request rate at an upstream that rate
+ * limits sustained traffic and then refuses everything for minutes. The lock
+ * is advisory and session scoped, so a pod dying mid pass releases it when
+ * its connection drops rather than wedging the job forever.
+ */
+const SYNC_LOCK_KEY = 848201;
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 interface ImportListEntry {
@@ -289,6 +301,19 @@ export class StoreSyncService {
      * we silently stopped being able to ship.
      */
     async syncStore(limit?: number): Promise<StoreSyncResult> {
+        const [lock] = await AppDataSource.query("SELECT pg_try_advisory_lock($1) AS ok", [SYNC_LOCK_KEY]);
+        if (!lock?.ok) {
+            log.info("Store sync already running elsewhere, skipping this pass");
+            return { listed: 0, synced: 0, skipped: 0, delisted: 0, errors: ["A store sync is already running"] };
+        }
+        try {
+            return await this.runSync(limit);
+        } finally {
+            await AppDataSource.query("SELECT pg_advisory_unlock($1)", [SYNC_LOCK_KEY]);
+        }
+    }
+
+    private async runSync(limit?: number): Promise<StoreSyncResult> {
         const entries = (await this.importList()).filter((e) => e.import_status === "in_store");
         const slice = limit && limit > 0 ? entries.slice(0, limit) : entries;
 

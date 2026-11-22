@@ -1,4 +1,5 @@
 import { StoreSyncService } from "../src/services/shop/store-sync-service";
+import { AppDataSource } from "../src/db/data-source";
 import { retailPriceFor } from "../src/config/shop-pricing";
 
 /**
@@ -182,5 +183,51 @@ describe("syncOne", () => {
         await s.syncOne(entry as any);
         const cheapest = Math.min(...saved[0].variants.map((v: any) => v.retail));
         expect(Number(saved[0].retailPrice)).toBe(cheapest);
+    });
+});
+
+/**
+ * Two API replicas both schedule this pass. Running it twice at once would
+ * double the request rate at an upstream that rate limits sustained traffic
+ * and then refuses everything for minutes, which is how the first attempt at
+ * this sync lost 95 of 125 products to a Cloudflare challenge.
+ */
+describe("syncStore locking", () => {
+    // spyOn cannot be used: query is not an own property of an uninitialised
+    // DataSource, so it is swapped in and put back by hand.
+    const original = (AppDataSource as any).query;
+    let calls: any[][];
+
+    const mockQuery = (ok: boolean) => {
+        calls = [];
+        (AppDataSource as any).query = jest.fn(async (...args: any[]) => {
+            calls.push(args);
+            return [{ ok }];
+        });
+    };
+
+    afterEach(() => {
+        (AppDataSource as any).query = original;
+        jest.restoreAllMocks();
+    });
+
+    it("does nothing when another replica already holds the lock", async () => {
+        mockQuery(false);
+        const s = svc();
+        const inner = jest.spyOn(s as any, "runSync");
+        const r = await s.syncStore();
+        expect(inner).not.toHaveBeenCalled();
+        expect(r.synced).toBe(0);
+        expect(r.errors[0]).toMatch(/already running/);
+        expect(calls).toHaveLength(1);
+    });
+
+    it("releases the lock even when the pass throws", async () => {
+        mockQuery(true);
+        const s = svc();
+        jest.spyOn(s as any, "runSync").mockRejectedValue(new Error("upstream down"));
+        await expect(s.syncStore()).rejects.toThrow("upstream down");
+        expect(calls).toHaveLength(2);
+        expect(String(calls[1][0])).toMatch(/pg_advisory_unlock/);
     });
 });

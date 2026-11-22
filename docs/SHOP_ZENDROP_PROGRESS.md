@@ -630,3 +630,25 @@ reached the shop.
 | Categories | 3 | 44 |
 | Price vs Zendrop's own | - | **~42% lower**, none below cost |
 | Products with options handled | none | all, via Shopify variant ids |
+
+### Who restricts the delivery countries (it is us)
+
+The shipping page originally read "if you enter an address anywhere else,
+Stripe will not let the order through", which is backwards and the owner
+caught it. Stripe is a payment service provider and has no view on where we
+deliver.
+
+The mechanism is one line in `createCheckout`:
+
+```ts
+shipping_address_collection: { allowed_countries: countries as any },
+```
+
+`countries` is read from `platform_settings.shopAllowedCountries`. We hand
+Stripe the list, their hosted page offers only those in the address
+dropdown, and that is the whole enforcement. Collecting the delivery address
+is ours to configure; Stripe just renders the form we asked for and takes
+the money.
+
+So widening the shop to another country is a settings change plus correct
+prices, never a payment-provider limitation. The page now says so.

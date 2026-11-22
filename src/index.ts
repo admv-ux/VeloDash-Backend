@@ -16,6 +16,7 @@ import { startOrderAutoCancel } from "./scripts/order-auto-cancel";
 import { startDriverFlagSuspender } from "./scripts/driver-flag-suspender";
 import { startBookingExpiry } from "./scripts/booking-expiry";
 import { startShopCatalogSync } from "./scripts/shop-catalog-sync";
+import { startShopStoreSync } from "./scripts/shop-store-sync";
 
 
 import orderRoutes from "./routes/orderRoutes";
@@ -347,6 +348,7 @@ preSyncFixes()
         startDriverFlagSuspender();
         startBookingExpiry();
         startShopCatalogSync();
+        startShopStoreSync();
       } catch (err) {
         logger.warn("Scheduled ride dispatcher failed to start", { error: (err as Error).message });
       }

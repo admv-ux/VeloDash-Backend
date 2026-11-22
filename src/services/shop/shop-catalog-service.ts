@@ -35,8 +35,14 @@ export interface CatalogItem {
     categoryName: string | null;
     inStock: boolean;
     estimatedDelivery: string | null;
-    /** Cheapest-first. One entry means the product has no options to choose. */
-    variants: CatalogVariantItem[];
+    /**
+     * How many buyable variants there are. The grid only needs to know
+     * whether there is a choice to make, and shipping the full arrays with a
+     * listing was 86% of the payload: one product alone has 100 variants.
+     */
+    variantCount: number;
+    /** Cheapest-first, and only on the detail response. */
+    variants?: CatalogVariantItem[];
 }
 
 /** A variant as the shopper sees it. Cost and the Shopify id stay server side. */
@@ -50,7 +56,8 @@ export interface CatalogVariantItem {
 
 const MAX_LIMIT = 60;
 
-function toItem(p: ShopProduct): CatalogItem {
+function toItem(p: ShopProduct, withVariants = false): CatalogItem {
+    const variants = toVariants(p.variants);
     return {
         id: p.id,
         name: p.name,
@@ -62,7 +69,8 @@ function toItem(p: ShopProduct): CatalogItem {
         categoryName: p.categoryName,
         inStock: p.inStock,
         estimatedDelivery: p.estimatedDelivery,
-        variants: toVariants(p.variants),
+        variantCount: variants.length,
+        ...(withVariants ? { variants } : {}),
     };
 }
 
@@ -124,13 +132,13 @@ export class ShopCatalogService {
         qb.addOrderBy("p.id", "ASC");
 
         const [rows, total] = await qb.skip((page - 1) * limit).take(limit).getManyAndCount();
-        return { total, page, limit, products: rows.map(toItem) };
+        return { total, page, limit, products: rows.map((r) => toItem(r)) };
     }
 
     async getById(id: string): Promise<(CatalogItem & { description: string | null }) | null> {
         const p = await this.productRepo.findOne({ where: { id, isActive: true, isFulfillable: true } });
         if (!p) return null;
-        return { ...toItem(p), description: p.description };
+        return { ...toItem(p, true), description: p.description };
     }
 
     /** Only categories we actually carry stock in, so no filter leads to an empty grid. */

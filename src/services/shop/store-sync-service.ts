@@ -221,10 +221,9 @@ export class StoreSyncService {
                 productCount: 0,
             });
         }
+        // A freshly created row has no isCarried yet, so this also persists it.
         if (!category.isCarried) {
             category.isCarried = true;
-            await this.categoryRepo.save(category);
-        } else if (!category.id) {
             await this.categoryRepo.save(category);
         }
     }
@@ -338,15 +337,29 @@ export class StoreSyncService {
      * we silently stopped being able to ship.
      */
     async syncStore(limit?: number): Promise<StoreSyncResult> {
-        const [lock] = await AppDataSource.query("SELECT pg_try_advisory_lock($1) AS ok", [SYNC_LOCK_KEY]);
-        if (!lock?.ok) {
-            log.info("Store sync already running elsewhere, skipping this pass");
-            return { listed: 0, synced: 0, skipped: 0, delisted: 0, errors: ["A store sync is already running"] };
-        }
+        // A dedicated connection, not AppDataSource.query. An advisory lock
+        // belongs to the session that took it, and the pool hands out a
+        // different connection per query: the unlock would run on a session
+        // that never held the lock, silently fail, and leave the lock held
+        // until that pooled connection happened to close. Every later pass
+        // would then skip forever.
+        const runner = AppDataSource.createQueryRunner();
+        await runner.connect();
         try {
-            return await this.runSync(limit);
+            const [lock] = await runner.query("SELECT pg_try_advisory_lock($1) AS ok", [SYNC_LOCK_KEY]);
+            if (!lock?.ok) {
+                log.info("Store sync already running elsewhere, skipping this pass");
+                return { listed: 0, synced: 0, skipped: 0, delisted: 0, errors: ["A store sync is already running"] };
+            }
+            try {
+                return await this.runSync(limit);
+            } finally {
+                await runner.query("SELECT pg_advisory_unlock($1)", [SYNC_LOCK_KEY]);
+            }
         } finally {
-            await AppDataSource.query("SELECT pg_advisory_unlock($1)", [SYNC_LOCK_KEY]);
+            // Releasing the runner also ends the session, so even a crash
+            // between the two queries cannot strand the lock.
+            await runner.release();
         }
     }
 

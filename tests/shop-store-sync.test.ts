@@ -221,26 +221,32 @@ describe("syncOne", () => {
  * this sync lost 95 of 125 products to a Cloudflare challenge.
  */
 describe("syncStore locking", () => {
-    // spyOn cannot be used: query is not an own property of an uninitialised
-    // DataSource, so it is swapped in and put back by hand.
-    const original = (AppDataSource as any).query;
+    const original = (AppDataSource as any).createQueryRunner;
     let calls: any[][];
+    let released: number;
 
-    const mockQuery = (ok: boolean) => {
+    const mockRunner = (ok: boolean) => {
         calls = [];
-        (AppDataSource as any).query = jest.fn(async (...args: any[]) => {
-            calls.push(args);
-            return [{ ok }];
+        released = 0;
+        (AppDataSource as any).createQueryRunner = () => ({
+            connect: async () => undefined,
+            // One object for every query, so the test fails if the lock and
+            // the unlock are ever issued on different connections.
+            query: async (...args: any[]) => {
+                calls.push(args);
+                return [{ ok }];
+            },
+            release: async () => { released++; },
         });
     };
 
     afterEach(() => {
-        (AppDataSource as any).query = original;
+        (AppDataSource as any).createQueryRunner = original;
         jest.restoreAllMocks();
     });
 
     it("does nothing when another replica already holds the lock", async () => {
-        mockQuery(false);
+        mockRunner(false);
         const s = svc();
         const inner = jest.spyOn(s as any, "runSync");
         const r = await s.syncStore();
@@ -248,14 +254,26 @@ describe("syncStore locking", () => {
         expect(r.synced).toBe(0);
         expect(r.errors[0]).toMatch(/already running/);
         expect(calls).toHaveLength(1);
+        expect(released).toBe(1);
     });
 
-    it("releases the lock even when the pass throws", async () => {
-        mockQuery(true);
+    it("releases the lock on the same connection that took it", async () => {
+        mockRunner(true);
+        const s = svc();
+        jest.spyOn(s as any, "runSync").mockResolvedValue({ listed: 1, synced: 1, skipped: 0, delisted: 0, errors: [] });
+        await s.syncStore();
+        expect(calls).toHaveLength(2);
+        expect(String(calls[0][0])).toMatch(/pg_try_advisory_lock/);
+        expect(String(calls[1][0])).toMatch(/pg_advisory_unlock/);
+        expect(released).toBe(1);
+    });
+
+    it("still unlocks and closes the connection when the pass throws", async () => {
+        mockRunner(true);
         const s = svc();
         jest.spyOn(s as any, "runSync").mockRejectedValue(new Error("upstream down"));
         await expect(s.syncStore()).rejects.toThrow("upstream down");
-        expect(calls).toHaveLength(2);
         expect(String(calls[1][0])).toMatch(/pg_advisory_unlock/);
+        expect(released).toBe(1);
     });
 });

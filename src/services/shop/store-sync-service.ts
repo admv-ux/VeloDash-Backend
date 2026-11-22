@@ -272,7 +272,19 @@ export class StoreSyncService {
         const ship = await this.shippingFor(entry.product_id);
 
         const existing = await this.productRepo.findOne({ where: { zendropProductId: entry.product_id } });
-        const row = existing || this.productRepo.create({ zendropProductId: entry.product_id });
+        // wholesalePrice is NOT NULL with no database default, so a new row has
+        // to carry a number before the unshippable path below tries to save it.
+        // Without this the insert threw and the row was never recorded at all,
+        // which is how 7 products Zendrop will not ship to the US vanished from
+        // the admin instead of showing up there as unsellable.
+        const row = existing || this.productRepo.create({
+            zendropProductId: entry.product_id,
+            wholesalePrice: 0,
+            shippingCost: 0,
+            landedCost: 0,
+            multiplier: 0,
+            retailPrice: 0,
+        });
 
         row.name = cat?.name || entry.product_name;
         row.description = cat?.description ?? null;

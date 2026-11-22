@@ -166,6 +166,18 @@ describe("syncOne", () => {
         expect(saved[0].isFulfillable).toBe(false);
     });
 
+    it("still records an unshippable NEW product, with money columns a database will accept", async () => {
+        // wholesalePrice is NOT NULL with no default. Leaving it undefined made
+        // the insert throw, so seven products Zendrop will not ship to the US
+        // were dropped on the floor instead of appearing in the admin.
+        const { s, saved } = harness({ ...linked, get_catalog_shipping_estimate: { shipping_options: [] } });
+        await s.syncOne(entry as any);
+        for (const col of ["wholesalePrice", "shippingCost", "landedCost", "multiplier", "retailPrice"]) {
+            expect(typeof saved[0][col]).toBe("number");
+        }
+        expect(saved[0].name).toBeTruthy();
+    });
+
     it("will not sell a product the store has not finished syncing", async () => {
         const { s, saved } = harness({ ...linked, get_my_product: { ...linked.get_my_product, store_sync_status: "pending" } });
         await expect(s.syncOne(entry as any)).resolves.toBe(false);

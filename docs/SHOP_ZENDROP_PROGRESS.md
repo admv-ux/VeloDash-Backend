@@ -541,3 +541,92 @@ The shop footer now points at `/privacy/` and `/legal/terms/`, which exist.
    store so Zendrop ingests them.
 4. `ZENDROP_API_ACCESS_TOKEN` as a GitHub repo secret.
 5. The `www.shopvelodash.com` A record, if `www` should resolve.
+
+### Two bugs the first live run exposed
+
+Both were found by measuring production rather than by reading the code, and
+neither would have shown up in a unit test.
+
+**1. Products arrived with no category.** `syncOne` never read
+`get_catalog_product.categories`, so `/shop/categories` returned an empty
+list and the category tiles, the browse filter and the "more in this
+category" rail all silently emptied. 28 of 30 sampled products do carry a
+Zendrop category. The sync now records it and creates the `shop_categories`
+row if the tree job has not seen it, since the storefront only offers
+categories flagged `isCarried`.
+
+**2. The advisory lock held nothing.** `pg_locks` showed no advisory lock
+while a pass was plainly running, and throughput measured **20 products a
+minute against a hard ceiling of 16.6 for one process**, so both replicas
+were syncing at once and doubling the load on an upstream that rate limits
+sustained traffic.
+
+The cause: `AppDataSource.query()` takes a connection from the pool per
+call, and an advisory lock belongs to the session that took it. Acquiring
+and releasing through the pool means the unlock runs on a session that never
+held the lock. Fixed with a dedicated `QueryRunner` released in a `finally`,
+so both statements share one session and the session ends even if the pass
+crashes between them.
+
+Verified live after the fix: `pg_locks` shows `848201` granted, the second
+replica logs "Store sync already running elsewhere, skipping this pass", and
+throughput dropped to 14/min.
+
+### Verification
+
+| Suite | Result |
+|---|---|
+| Backend unit/integration | **260 passed, 26 suites** (was 228/25) |
+| Variant + catalogue E2E, live site, desktop and 390px | **52 / 52** |
+| Paid order with two options, real Stripe session + signed webhook | **20 / 20** |
+
+The paid-order run proves the whole money path with variants: a live Stripe
+session for two options of one watch, marked paid by a webhook signed
+**inside the pod** so the signing secret never left the cluster, then the
+order page rendered with both option names, the total and the delivery
+address. No card was charged.
+
+Afterwards all five verification orders were deleted and their five live
+Stripe sessions expired. `shop_orders` holds **0 paid revenue**.
+
+> One row remains that is **not** from this work: `VD-FCVDJLRG`,
+> `payment_failed`, $9.99, created 2026-11-21 23:45 with no email. No money
+> moved. It is left alone because it cannot be told apart from a real
+> shopper whose card was declined. Delete it if you know it was a test.
+
+### The store is still filling
+
+The Zendrop import list grew from **125 to 227 entries** while this was being
+built, so more products are being pushed to Shopify as this is written. The
+sync picks them up on its own: nothing needs re-running by hand, and the
+twice-daily pass will keep the shop level with the store.
+
+### Third bug, from the first completed pass
+
+`listed 226, synced 219, skipped 7` and every one of the 7 skips was the
+same thing:
+
+```
+null value in column "wholesalePrice" of relation "shop_products"
+violates not-null constraint
+```
+
+`wholesalePrice` is NOT NULL with no database default. The unshippable path
+saves the row deliberately, so the admin can see a product Zendrop will not
+ship to the US, but a brand new row reached that save with the column unset
+and the insert threw. The rows were never recorded at all, so those seven
+products disappeared rather than showing up as unsellable. New rows now
+carry zeroes in the money columns before anything can save them.
+
+Nothing was mispriced by this: the failure was on insert, so no bad row ever
+reached the shop.
+
+### Where this landed
+
+| | before | after |
+|---|---|---|
+| Products on the shop | 148, **none shippable** | **219, all shippable** |
+| Overlap with the Shopify store | **0** | complete |
+| Categories | 3 | 44 |
+| Price vs Zendrop's own | - | **~42% lower**, none below cost |
+| Products with options handled | none | all, via Shopify variant ids |

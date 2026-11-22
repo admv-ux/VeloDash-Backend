@@ -71,6 +71,19 @@ export class ShopProduct {
     @Column({ type: "integer", nullable: true })
     importListId: number | null;
 
+    /**
+     * Shipping quotes per destination, keyed by ISO country code.
+     *
+     * A cache, not a source of truth: Zendrop quotes shipping per product per
+     * country, and asking them live for every basket line would put a slow
+     * third party in the middle of checkout. Filled on first use for a
+     * destination and reused after, with `at` so a stale quote can be spotted.
+     * `null` for a country means Zendrop offered nothing, which is a real
+     * answer and is cached too, so we stop asking.
+     */
+    @Column({ type: "jsonb", default: () => "'{}'::jsonb" })
+    shippingByCountry: Record<string, { cost: number; eta: string | null; at: string } | null>;
+
     /** Buyable variants with their Shopify ids. Empty until the store sync runs. */
     @Column({ type: "jsonb", default: () => "'[]'::jsonb" })
     variants: ShopProductVariant[];

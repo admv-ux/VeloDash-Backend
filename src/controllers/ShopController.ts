@@ -31,6 +31,7 @@ export class ShopController {
             const result = await this.checkout.createCheckout({
                 lines: req.body?.items,
                 email: req.body?.email,
+                country: req.body?.country,
                 successUrl: `${this.shopBaseUrl}/order/{ORDER_ID}`,
                 cancelUrl: `${this.shopBaseUrl}/cart?cancelled=1`,
             });
@@ -42,6 +43,41 @@ export class ShopController {
             }
             log.error("startCheckout failed", { error: (e as Error).message });
             res.status(500).json({ message: "Could not start checkout" });
+        }
+    };
+
+    /**
+     * POST /shop/quote - price a basket for a destination without creating an
+     * order.
+     *
+     * The cart needs to show what a country adds before anyone commits to
+     * paying, and shipping is quoted per product per country, so it cannot be
+     * worked out in the browser.
+     */
+    quoteBasket = async (req: Request, res: Response) => {
+        try {
+            const country = await this.checkout.resolveCountry(req.body?.country);
+            const quote = await this.checkout.quote(req.body?.items, country);
+            res.json({
+                country: quote.country,
+                subtotal: quote.subtotal,
+                shippingTotal: quote.shippingTotal,
+                total: quote.total,
+                items: quote.items.map((i) => ({
+                    productId: i.productId,
+                    variantId: i.variantId,
+                    name: i.name,
+                    quantity: i.quantity,
+                    lineTotal: i.lineTotal,
+                })),
+            });
+        } catch (e) {
+            if (e instanceof CheckoutError) {
+                res.status(e.statusCode).json({ message: e.message });
+                return;
+            }
+            log.error("quoteBasket failed", { error: (e as Error).message });
+            res.status(500).json({ message: "Could not price that basket" });
         }
     };
 

@@ -114,6 +114,32 @@ const checkoutLimiter = rateLimit({
 router.post("/checkout", checkoutLimiter, shop.startCheckout);
 
 /**
+ * Pricing a basket is cheap for us but can reach Zendrop on a cache miss, so
+ * it gets its own, looser limit: a shopper comparing a few destinations is
+ * normal behaviour and must not burn their checkout allowance.
+ */
+const quoteLimiter = rateLimit({
+    windowMs: 15 * 60_000,
+    limit: 120,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { message: "Too many pricing requests. Please try again shortly." },
+});
+
+/**
+ * @openapi
+ * /shop/quote:
+ *   post:
+ *     tags: [Shop]
+ *     summary: Price a basket for a destination without creating an order
+ *     responses:
+ *       200: { description: Subtotal, shipping and total for that country }
+ *       400: { description: Basket invalid, or we do not deliver there }
+ *       409: { description: An item cannot be shipped to that country }
+ */
+router.post("/quote", quoteLimiter, shop.quoteBasket);
+
+/**
  * @openapi
  * /shop/shipping-countries:
  *   get:

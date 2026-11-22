@@ -157,13 +157,25 @@ export class PlatformSettings {
     partnerReferralThreshold: number;
 
     // Shop: which destinations checkout will accept, as ISO 3166-1 alpha-2,
-    // comma separated. US only at launch, and that is a pricing constraint
-    // rather than a shipping one: retail prices were built from Zendrop's US
-    // shipping quote, so selling into a dearer destination eats the margin.
-    // Measured 2026-11-20, Ghana costs 6.45 more per item than the US, which
-    // puts the cheapest 4 of 148 products underwater. Widening this is a
-    // settings change once per destination shipping is priced at sync time.
-    @Column({ type: "varchar", length: 500, default: "US" })
+    // comma separated.
+    //
+    // Chosen for dependable street addressing and postcodes, then confirmed
+    // against real Zendrop quotes on 2026-11-22: all of these returned a
+    // shipping option for the main supplier. Markets that rely on digital or
+    // descriptive addressing are left out on purpose, because a dropshipped
+    // parcel with an address a courier cannot find is a refund.
+    //
+    // Pricing per destination is handled at checkout, not here: retail prices
+    // carry US shipping, and ShippingQuoteService charges the difference for
+    // anywhere dearer. Several of these are CHEAPER than the US, so they cost
+    // the shopper nothing extra. A product that cannot reach a destination at
+    // all, which is every US-supplier item, is refused per basket rather than
+    // by removing the country.
+    @Column({
+        type: "varchar",
+        length: 500,
+        default: "US,CA,GB,IE,AU,NZ,DE,FR,NL,BE,AT,CH,ES,IT,PT,SE,DK,NO,FI,PL,CZ,JP,SG,KR,HK,AE,IL",
+    })
     shopAllowedCountries: string;
 
     @Column({ type: "integer", default: 10 })

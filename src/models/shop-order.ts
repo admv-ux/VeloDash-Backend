@@ -87,9 +87,19 @@ export class ShopOrder {
     @Column({ type: "decimal", precision: 10, scale: 2 })
     subtotal: number;
 
-    /** Shipping is already inside each retail price for the countries we sell to. */
+    /**
+     * What the destination added on top of the item prices.
+     *
+     * Zero for the US, whose shipping is already inside every retail price.
+     * Elsewhere it is the quoted difference, so an order never ships below
+     * its landed cost.
+     */
     @Column({ type: "decimal", precision: 10, scale: 2, default: 0 })
     shippingTotal: number;
+
+    /** Destination this order was priced for, ISO-3166-1 alpha-2. */
+    @Column({ type: "varchar", length: 2, default: "US" })
+    shippingCountry: string;
 
     @Column({ type: "decimal", precision: 10, scale: 2 })
     total: number;

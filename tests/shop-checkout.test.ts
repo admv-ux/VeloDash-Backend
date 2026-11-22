@@ -10,11 +10,11 @@ const v = (storeVariantId: string, title: string, retail: number, inStock = true
     ({ sku: null, title, storeVariantId, zendropVariantId: null, wholesale: 1, landedCost: 2, retail, image: null, inStock });
 
 const PRODUCTS: any[] = [
-    { id: "11111111-1111-1111-1111-111111111111", zendropProductId: 1, name: "Cheap thing", image: "a.webp", retailPrice: "9.99", isActive: true, isFulfillable: true, inStock: true, variants: [v("901", "Default", 9.99)] },
-    { id: "22222222-2222-2222-2222-222222222222", zendropProductId: 2, name: "Dear thing", image: null, retailPrice: "74.99", isActive: true, isFulfillable: true, inStock: true, variants: [v("902", "Default", 74.99)] },
+    { id: "11111111-1111-1111-1111-111111111111", zendropProductId: 1, name: "Cheap thing", image: "a.webp", retailPrice: "9.99", isActive: true, isFulfillable: true, inStock: true, shippingCost: 5, shippingByCountry: {}, variants: [v("901", "Default", 9.99)] },
+    { id: "22222222-2222-2222-2222-222222222222", zendropProductId: 2, name: "Dear thing", image: null, retailPrice: "74.99", isActive: true, isFulfillable: true, inStock: true, shippingCost: 5, shippingByCountry: {}, variants: [v("902", "Default", 74.99)] },
     { id: "33333333-3333-3333-3333-333333333333", zendropProductId: 3, name: "Gone thing", image: null, retailPrice: "19.99", isActive: true, isFulfillable: true, inStock: false, variants: [v("903", "Default", 19.99)] },
     // Options, so there is something real to choose wrongly.
-    { id: "44444444-4444-4444-4444-444444444444", zendropProductId: 4, name: "Sized thing", image: null, retailPrice: "29.99", isActive: true, isFulfillable: true, inStock: true, variants: [v("941", "Small", 29.99), v("942", "Large", 39.99), v("943", "XL", 49.99, false)] },
+    { id: "44444444-4444-4444-4444-444444444444", zendropProductId: 4, name: "Sized thing", image: null, retailPrice: "29.99", isActive: true, isFulfillable: true, inStock: true, shippingCost: 5, shippingByCountry: {}, variants: [v("941", "Small", 29.99), v("942", "Large", 39.99), v("943", "XL", 49.99, false)] },
     // In the store but with nothing orderable left in it.
     { id: "55555555-5555-5555-5555-555555555555", zendropProductId: 5, name: "Variantless thing", image: null, retailPrice: "14.99", isActive: true, isFulfillable: true, inStock: true, variants: [] },
 ];
@@ -321,5 +321,76 @@ describe("getOrder", () => {
         (svc as any).orderRepo = { findOne };
         expect(await svc.getOrder("../../etc/passwd")).toBeNull();
         expect(findOne).not.toHaveBeenCalled();
+    });
+});
+
+/**
+ * Destination pricing. Retail prices carry US shipping, so anywhere dearer
+ * has to add the difference or the order ships below its landed cost. Real
+ * measurements behind these numbers: a graphite case is $4.58 to the US and
+ * $12.39 to Australia, while a leather jacket is $44.77 to the US and $22.49
+ * to Britain.
+ */
+describe("destination pricing", () => {
+    const withShipping = (quotes: Record<string, any>) => {
+        const { svc, saved } = buildService({ countries: "US,GB,AU" });
+        (svc as any).shipping = {
+            quoteMany: jest.fn(async (products: any[]) =>
+                new Map(products.map((p) => [p.id, quotes[p.id] ?? quotes["*"] ?? null]))),
+            surchargePerUnit: (p: any, q: any) => {
+                const d = q.cost - (Number(p.shippingCost) || 0);
+                return d > 0 ? Math.round(d * 100) / 100 : 0;
+            },
+        };
+        return { svc, saved };
+    };
+
+    it("adds nothing for the baseline market", async () => {
+        const { svc } = withShipping({ "*": { cost: 99, eta: null } });
+        const q = await svc.quote([line(CHEAP, 1)], "US");
+        expect(q.shippingTotal).toBe(0);
+        expect(q.total).toBe(q.subtotal);
+    });
+
+    it("charges the difference, multiplied by quantity", async () => {
+        const { svc } = withShipping({ "*": { cost: 12.39, eta: null } });
+        const q = await svc.quote([line(CHEAP, 3)], "AU");
+        expect(q.shippingTotal).toBeCloseTo(7.39 * 3, 2);
+        expect(q.total).toBeCloseTo(q.subtotal + 7.39 * 3, 2);
+    });
+
+    it("charges nothing where the destination is cheaper than the US", async () => {
+        const { svc } = withShipping({ "*": { cost: 2.5, eta: null } });
+        const q = await svc.quote([line(CHEAP, 2)], "GB");
+        expect(q.shippingTotal).toBe(0);
+    });
+
+    it("names every blocked item at once, not the first one it hits", async () => {
+        const { svc } = withShipping({});
+        await expect(svc.quote([line(CHEAP, 1), line(DEAR, 1)], "GB"))
+            .rejects.toThrow(/2 items cannot be shipped/);
+    });
+
+    it("names the single blocked item on its own", async () => {
+        const { svc } = withShipping({ [DEAR]: { cost: 6, eta: null } });
+        await expect(svc.quote([line(CHEAP, 1), line(DEAR, 1)], "GB"))
+            .rejects.toThrow(/"Cheap thing" cannot be shipped/);
+    });
+
+    it("refuses a country we do not deliver to", async () => {
+        const { svc } = buildService({ countries: "US,GB" });
+        await expect(svc.resolveCountry("ZW")).rejects.toThrow(/do not deliver/);
+    });
+
+    it("refuses a malformed country rather than guessing", async () => {
+        const { svc } = buildService({ countries: "US,GB" });
+        // Falls back to the baseline, which is allowed, instead of passing
+        // junk to Stripe's allowed_countries.
+        await expect(svc.resolveCountry("'; DROP TABLE--")).resolves.toBe("US");
+    });
+
+    it("accepts a country we do deliver to, in any case", async () => {
+        const { svc } = buildService({ countries: "US,GB" });
+        await expect(svc.resolveCountry("gb")).resolves.toBe("GB");
     });
 });

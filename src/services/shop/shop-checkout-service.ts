@@ -6,6 +6,7 @@ import { PlatformSettings } from "../../models/platform-settings";
 import { paymentProviderRegistry } from "../payment/payment-provider-registry";
 import { createServiceLogger } from "../../utils/logger";
 import { In } from "typeorm";
+import { ShippingQuoteService, BASELINE_COUNTRY } from "./shipping-quote-service";
 
 const log = createServiceLogger("ShopCheckout");
 
@@ -51,6 +52,7 @@ export class ShopCheckoutService {
     private productRepo = AppDataSource.getRepository(ShopProduct);
     private orderRepo = AppDataSource.getRepository(ShopOrder);
     private settingsRepo = AppDataSource.getRepository(PlatformSettings);
+    private shipping = new ShippingQuoteService();
 
     /** Destinations checkout accepts. See the note on the settings column. */
     async allowedCountries(): Promise<string[]> {
@@ -70,7 +72,10 @@ export class ShopCheckoutService {
      * stock all come from the database, because a price posted by the browser
      * is a price the shopper chose.
      */
-    async quote(lines: CheckoutRequestLine[]): Promise<{ items: ShopOrderLine[]; subtotal: number }> {
+    async quote(
+        lines: CheckoutRequestLine[],
+        country: string = BASELINE_COUNTRY,
+    ): Promise<{ items: ShopOrderLine[]; subtotal: number; shippingTotal: number; total: number; country: string }> {
         if (!Array.isArray(lines) || lines.length === 0) {
             throw new CheckoutError("Your basket is empty");
         }
@@ -143,7 +148,62 @@ export class ShopCheckoutService {
             });
         }
 
-        return { items, subtotal: subtotalCents / 100 };
+        // Shipping to anywhere but the baseline market is charged as the
+        // difference, because the retail price already carries US shipping.
+        // Quoted per product, since this catalogue ranges from under a dollar
+        // to over twelve for the same destination.
+        let shippingCents = 0;
+        if (country !== BASELINE_COUNTRY) {
+            const ordered = [...wanted.values()].map((l) => byId.get(l.productId)!).filter(Boolean);
+            const quotes = await this.shipping.quoteMany(ordered, country);
+            // Every blocked item is named at once. Reporting them one at a
+            // time would make a shopper discover a four item problem over
+            // four attempts, and roughly one product in fourteen here comes
+            // from a US supplier that ships nowhere else.
+            const blocked: string[] = [];
+            for (const line of wanted.values()) {
+                const p = byId.get(line.productId)!;
+                const quote = quotes.get(p.id);
+                if (!quote) {
+                    blocked.push(p.name);
+                    continue;
+                }
+                shippingCents += cents(this.shipping.surchargePerUnit(p, quote)) * line.quantity;
+            }
+            if (blocked.length) {
+                const names = blocked.map((n) => `"${n.slice(0, 60)}"`).join(", ");
+                throw new CheckoutError(
+                    blocked.length === 1
+                        ? `${names} cannot be shipped to that country. Remove it or choose another destination.`
+                        : `${blocked.length} items cannot be shipped to that country: ${names}. Remove them or choose another destination.`,
+                    409,
+                );
+            }
+        }
+
+        return {
+            items,
+            subtotal: subtotalCents / 100,
+            shippingTotal: shippingCents / 100,
+            total: (subtotalCents + shippingCents) / 100,
+            country,
+        };
+    }
+
+    /**
+     * Destination for this basket, rejected unless we actually sell there.
+     *
+     * Validated here rather than left to Stripe: Stripe only restricts the
+     * address dropdown because we hand it a list, so an unchecked country
+     * would be priced on a US shipping quote and shipped at a loss.
+     */
+    async resolveCountry(raw: unknown): Promise<string> {
+        const country = ShippingQuoteService.normaliseCountry(raw) || BASELINE_COUNTRY;
+        const allowed = await this.allowedCountries();
+        if (!allowed.includes(country)) {
+            throw new CheckoutError("We do not deliver to that country yet", 400);
+        }
+        return country;
     }
 
     /**
@@ -185,17 +245,19 @@ export class ShopCheckoutService {
         /** May contain {ORDER_ID}, replaced once the order row exists. */
         successUrl: string;
         cancelUrl: string;
+        country?: string;
     }): Promise<{ orderId: string; orderNumber: string; total: number; checkoutUrl: string }> {
-        const { items, subtotal } = await this.quote(params.lines);
-        const countries = await this.allowedCountries();
+        const country = await this.resolveCountry(params.country);
+        const { items, subtotal, shippingTotal, total } = await this.quote(params.lines, country);
 
         const order = this.orderRepo.create({
             orderNumber: orderNumber(),
             email: (params.email || "").trim().toLowerCase().slice(0, 200),
             items,
             subtotal,
-            shippingTotal: 0,
-            total: subtotal,
+            shippingTotal,
+            total,
+            shippingCountry: country,
             currency: "USD",
             status: ShopOrderStatus.AWAITING_PAYMENT,
         });
@@ -208,18 +270,36 @@ export class ShopCheckoutService {
                 mode: "payment",
                 // Stripe rejects an empty string here, so only send a real one.
                 ...(order.email ? { customer_email: order.email } : {}),
-                line_items: items.map((i) => ({
-                    quantity: i.quantity,
-                    price_data: {
-                        currency: "usd",
-                        unit_amount: cents(i.unitPrice),
-                        product_data: {
-                            name: i.name.slice(0, 250),
-                            ...(i.image ? { images: [i.image] } : {}),
+                line_items: [
+                    ...items.map((i) => ({
+                        quantity: i.quantity,
+                        price_data: {
+                            currency: "usd" as const,
+                            unit_amount: cents(i.unitPrice),
+                            product_data: {
+                                name: i.name.slice(0, 250),
+                                ...(i.image ? { images: [i.image] } : {}),
+                            },
                         },
-                    },
-                })),
-                shipping_address_collection: { allowed_countries: countries as any },
+                    })),
+                    // Shown as its own line so the shopper can see exactly what
+                    // the destination adds, rather than finding it folded into
+                    // the item prices.
+                    ...(shippingTotal > 0
+                        ? [{
+                            quantity: 1,
+                            price_data: {
+                                currency: "usd" as const,
+                                unit_amount: cents(shippingTotal),
+                                product_data: { name: `International shipping to ${country}` },
+                            },
+                        }]
+                        : []),
+                ],
+                // Only the country this basket was priced for. Offering the
+                // whole list here would let a shopper pick a destination we
+                // did not quote and ship it at a loss.
+                shipping_address_collection: { allowed_countries: [country] as any },
                 success_url: params.successUrl.replace("{ORDER_ID}", order.id),
                 cancel_url: params.cancelUrl,
                 // Both ids travel with the session: the first is what the

@@ -737,3 +737,96 @@ German destination and naming itself.
   `VD-FCVDJLRG` (payment_failed, $9.99, 2026-11-21) and one at 22:53 on
   2026-11-22 for $61.99, both with no email and no money taken. They cannot be
   told apart from a real shopper who did not finish paying.
+
+## Slice: the supplier fulfilment chain (2026-11-23)
+
+A full-privilege Zendrop token arrived, so the write half of the API is open.
+The token was installed in the cluster and verified end to end.
+
+### The constraint that shapes everything
+
+**Zendrop has no `create_order` tool.** `tools/list` returns 39 tools covering
+fulfil, cancel, track, cost, issues, billing and stores, and nothing that
+injects an order. Zendrop only ever learns about an order by reading it from
+the connected store, so the money path has to be:
+
+```
+Stripe paid -> order written into Shopify -> Zendrop ingests -> fulfill_order
+```
+
+Each hop is a separate, resumable step, because when a parcel is missing the
+question is never "did it fail" but "which hop did it fail at".
+
+### Two sharp edges in the Zendrop API
+
+**`fulfill_order` with a `store_id` and no `order_ids` targets EVERY
+unfulfilled order in the store.** One careless call would charge the account
+for the lot. An explicit `order_ids` is always sent, never omitted, and a test
+asserts it by name.
+
+**Fulfilment is a two step handshake.** A free preview, then `confirmed: true`
+within five minutes carrying an *identical* `is_credit_redeem`; a mismatch is
+rejected. The service always previews first, even when confirming, and returns
+the cost without charging when `confirm` is false.
+
+### What was built
+
+| File | Does |
+| --- | --- |
+| `src/services/shop/shopify-order-service.ts` | Writes the paid order into Shopify |
+| `src/services/shop/zendrop-fulfillment-service.ts` | Links, prices, fulfils, tracks |
+| `AdminShopController` + `adminRoutes` | One endpoint per hop |
+| `velo-admin` Orders table | Chain state plus one "next step" button |
+
+`ShopOrder` gained `shopifyOrderName`, `zendropStatus`, `fulfillmentCost`,
+`tracking` and `fulfilledAt`. `shopifyOrderName` ("#1004") exists because it is
+the **only** handle Zendrop can be searched by: `get_orders`'s `keyword` filter
+matches the store's order number, not our `VD-` code and not the Shopify
+numeric id.
+
+Shopify receipts are suppressed on the pushed order. The sale already happened
+on shopvelodash.com through Stripe, and a second confirmation from an
+unfamiliar myshopify.com address reads as a phishing attempt.
+`inventory_behaviour: bypass` is deliberate too: these are dropshipped goods
+with no stock of our own, and the default refuses an untracked variant.
+
+### The token, and a security finding
+
+The leaked token was still **fully live with identical privileges**, verified
+with real authenticated calls against a deliberately invalid control. A new
+token does not revoke an old one. Only the owner can delete it in the Zendrop
+dashboard.
+
+`tools/list` returns the same 39 tools for any valid token, so it is useless
+for checking privileges. Use `get_stores` or `get_billing_credit_balance`.
+
+The GitHub repo secret `ZENDROP_API_ACCESS_TOKEN` is **not set**, which is
+safe: `set_secret` skips an empty repo secret and leaves the cluster value
+alone. If it is ever set to a stale token it will overwrite the good cluster
+value on the next deploy.
+
+### Verified live
+
+```
+cluster + both pods see the new token        yes, and it survived a deploy
+cold Korea quote through the live API         $23.99 + $5.50 = $29.49
+compiled service in-pod -> Zendrop credit     $59
+all six new routes in the shipped bundle      yes
+live admin bundle carries the new UI          yes
+sellable products / destinations              219 / 27, unchanged
+```
+
+333 backend tests across 28 suites, 49 of them new.
+
+### Not done, and why
+
+- **`SHOPIFY_ADMIN_TOKEN` (`shpat_...`, `write_orders`) does not exist yet.**
+  Until it does, `pushToStore` answers 503 and the admin dashboard shows an
+  amber banner saying orders cannot reach the supplier. Payments are still
+  taken and recorded correctly.
+- **No real fulfilment has been dispatched.** `confirmed: true` spends money
+  and there is nothing in the store to fulfil, so the write path is proven by
+  tests and by its free preview only.
+- **No customer emails.** Neither an order confirmation nor a tracking mail
+  exists; the buyer currently sees only the confirmation page and whatever
+  Stripe sends.

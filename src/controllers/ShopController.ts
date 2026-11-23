@@ -96,6 +96,10 @@ export class ShopController {
                     email: order.email,
                     items: order.items,
                     subtotal: Number(order.subtotal),
+                    // Without this the page shows item lines that do not add
+                    // up to the total, which reads as an unexplained charge.
+                    shippingTotal: Number(order.shippingTotal),
+                    shippingCountry: order.shippingCountry,
                     total: Number(order.total),
                     currency: order.currency,
                     status: order.status,

@@ -830,3 +830,73 @@ sellable products / destinations              219 / 27, unchanged
 - **No customer emails.** Neither an order confirmation nor a tracking mail
   exists; the buyer currently sees only the confirmation page and whatever
   Stripe sends.
+
+## Slice: take the supply chain off the customer pages (2026-11-23)
+
+The owner asked for two shipping-page sections to go: the supplier-origin
+breakdown ("China 203 items (93%), United States 16 items (7%)", with "sent
+directly by the supplier who makes or warehouses that item") and the "this is
+not a Velo courier delivery" disclaimer.
+
+Removing a section means removing the data behind it. `/shop/shipping-countries`
+was returning a per-country item count for every sellable product, and a public
+endpoint is a public disclosure however the page chooses to use it. The
+`origins()` query is gone rather than orphaned; the endpoint now returns
+destinations only.
+
+Three further references were left behind after the first pass and were caught
+by grepping the storefront rather than by reading the page:
+
+- `Order.jsx` said "your items ship directly from our supplier, so they are not
+  a same day delivery", which is both halves of what had just been removed. It
+  also promised a tracking email that nothing sends.
+- `Shipping.jsx` still said a few items "come from a supplier that only ships
+  within the United States". The fact matters to the buyer; naming a supplier
+  does not.
+- A stale comment in `Home.jsx`.
+
+### What replaced them
+
+A "Delivery times" block carrying what a buyer actually needs: estimates live
+on each product page because they genuinely differ, items ordered together can
+arrive separately, and tracking follows collection.
+
+The order page now shows **real tracking numbers**, linked where the carrier
+gives a URL, instead of promising an email. That needed `tracking` on the
+public order endpoint, which the new fulfilment chain had started recording.
+
+### A defect the verification found
+
+Rendering a synthetic paid order exposed an unrelated bug: the page listed
+items totalling $47.98 against a total of $53.48 with nothing accounting for
+the $5.50. On a page about money that reads as an unexplained charge. The
+endpoint now returns `shippingTotal` and `shippingCountry`, and the page
+itemises "Items" and "Delivery to South Korea" above the total.
+
+### Verified live
+
+```
+/shop/shipping-countries keys         ["countries"] only, 27 destinations
+word "supplier" in the shipped bundle  0 occurrences
+shipping page sections                 Where we ship, Delivery times,
+                                       What shipping costs, Customs
+paid order page                        tracking shown, totals add up
+js errors, desktop and 390px           none
+```
+
+The paid branch of the order page cannot be reached without a paid order, so
+it was checked by inserting a synthetic paid row with two tracking numbers,
+screenshotting both widths, then deleting it. No Stripe session, no money.
+
+### Test suite correction
+
+`test_variants.py` was asserting the behaviour that had just been removed:
+"shipping endpoint reports real origins", "origins are counted from stock" and
+"shipping page says it is not a courier delivery". The site was right and the
+test was stale. Those now assert the **absence** of the removed content, so a
+later copy edit cannot quietly bring it back, plus a positive check that the
+delivery-times block is present.
+
+Removing the old origins wait also removed the pause that let the destination
+list load, so the body was read before the API answered. A wait on "we
+currently deliver to" restores it.

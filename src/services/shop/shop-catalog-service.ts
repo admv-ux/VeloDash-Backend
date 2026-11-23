@@ -157,29 +157,6 @@ export class ShopCatalogService {
             .filter(c => c.count > 0);
     }
 
-    /**
-     * Where the sellable stock physically ships from, counted rather than
-     * assumed.
-     *
-     * The shop quotes one delivery estimate per product, but the honest
-     * version of "how long and from where" is a question about the whole
-     * catalogue, and the answer changes as the store changes. Counting it
-     * here keeps the shipping page truthful without anyone remembering to
-     * edit it.
-     */
-    async origins(): Promise<{ country: string; count: number }[]> {
-        const rows = await this.productRepo
-            .createQueryBuilder("p")
-            .select("p.shipsFrom", "country")
-            .addSelect("COUNT(*)::int", "count")
-            .where("p.isActive = true AND p.isFulfillable = true")
-            .andWhere("p.shipsFrom IS NOT NULL")
-            .groupBy("p.shipsFrom")
-            .orderBy("COUNT(*)", "DESC")
-            .getRawMany();
-        return rows.map((r) => ({ country: String(r.country).toUpperCase(), count: Number(r.count) }));
-    }
-
     /** The price slider needs real bounds, not guessed ones. */
     async priceRange(): Promise<{ min: number; max: number }> {
         const row = await this.productRepo

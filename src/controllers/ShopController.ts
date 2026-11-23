@@ -114,15 +114,10 @@ export class ShopController {
     /** GET /shop/shipping-countries - so the storefront can say where it ships. */
     getShippingCountries = async (_req: Request, res: Response) => {
         try {
-            const [countries, origins] = await Promise.all([
-                this.checkout.allowedCountries(),
-                this.catalog.origins(),
-            ]);
-            // Origins ship with the destinations because the shipping page has
-            // to answer "from where" and "how long" in the same breath as
-            // "where to", and a second request just to say "mostly China" is
-            // a request the page would sometimes render without.
-            res.json({ countries, origins });
+            // Destinations only. This deliberately does NOT report which
+            // countries stock ships from: that is supplier information, and a
+            // public endpoint is a public disclosure however the page uses it.
+            res.json({ countries: await this.checkout.allowedCountries() });
         } catch (e) {
             log.error("getShippingCountries failed", { error: (e as Error).message });
             res.status(500).json({ message: "Could not load shipping countries" });

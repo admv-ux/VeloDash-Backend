@@ -153,6 +153,17 @@ export class ShopProduct {
     @Column({ type: "varchar", length: 8, nullable: true })
     shipsFrom: string | null;
 
+    /**
+     * Internal only. Never publish this to a shopper.
+     *
+     * It is the shipping leg for ONE country, the US pricing baseline, and it
+     * excludes the one to three business days (five when busy) before an
+     * order is dispatched at all. The storefront used to render it as "Ships
+     * in 8 days", which named the wrong event, used the wrong country for
+     * everyone outside the US, and left out the dispatch wait. There is no
+     * figure here honest enough to print, so nothing is printed and the
+     * shopper gets a tracking number instead.
+     */
     @Column({ type: "varchar", length: 64, nullable: true })
     estimatedDelivery: string | null;
 

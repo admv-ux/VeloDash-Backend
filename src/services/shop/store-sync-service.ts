@@ -62,11 +62,18 @@ const MAX_SANE_RETAIL = 2000;
 const SYNC_LOCK_KEY = 848201;
 
 /**
- * A push pass takes its own lock. It is a different job from a sync and the
- * two may legitimately overlap, but two push passes would add the same
- * products twice and burn the same upstream quota doing it.
+ * A push takes the SAME lock as a sync, deliberately.
+ *
+ * They were given separate locks on the reasoning that they are different
+ * jobs that may overlap. That was wrong and it cost 65 products: a sync
+ * takes its snapshot of the import list at the start, runs for 35 minutes,
+ * and then delists everything not in that snapshot. A push running beside it
+ * puts new products in the store during those 35 minutes, and the sync ends
+ * by marking every one of them "Removed from the store upstream" when they
+ * had just been added to it. Both jobs reconcile the same catalogue against
+ * the same upstream, so only one of them may hold it at a time.
  */
-const PUSH_LOCK_KEY = 848202;
+const PUSH_LOCK_KEY = SYNC_LOCK_KEY;
 
 /** Pushing to Shopify is asynchronous upstream; it took ~40s in practice. */
 const PUSH_POLL_MS = 3000;
@@ -504,7 +511,7 @@ export class StoreSyncService {
         try {
             const [lock] = await runner.query("SELECT pg_try_advisory_lock($1) AS ok", [PUSH_LOCK_KEY]);
             if (!lock?.ok) {
-                return { attempted: 0, nowSellable: 0, failed: 0, results: [{ productId: 0, ok: false, message: "A push is already running" }] };
+                return { attempted: 0, nowSellable: 0, failed: 0, results: [{ productId: 0, ok: false, message: "A catalogue sync or push is already running. Try again when it finishes." }] };
             }
             try {
                 const rows = await this.productRepo.find({
@@ -584,7 +591,21 @@ export class StoreSyncService {
         // Only a full pass may delist, since a partial pass has not seen the
         // products it did not reach.
         if (!limit) {
-            const keep = entries.map((e) => e.product_id);
+            // Re-read the list first. The snapshot above can be well over
+            // half an hour old by now, and anything added to the store in
+            // that window is not in it: delisting against the stale copy
+            // marks a product that has just arrived as one that has left.
+            // The lock stops our own push from being that source, but the
+            // owner adding products in Zendrop's own dashboard is not
+            // something a lock of ours can prevent.
+            let keep: number[];
+            try {
+                keep = (await this.importList()).map((e) => e.product_id);
+            } catch (e) {
+                log.warn("Skipping the delist pass: could not re-read the import list", { error: (e as Error).message });
+                log.info("Store sync finished", { ...result, errors: result.errors.length });
+                return result;
+            }
             const stale = await this.productRepo
                 .createQueryBuilder()
                 .update(ShopProduct)

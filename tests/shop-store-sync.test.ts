@@ -480,3 +480,88 @@ describe("pushToStore", () => {
         expect(summary.results[0].message).toBe("upstream exploded");
     });
 });
+
+/**
+ * The delist pass is the one step that can take products OFF sale, so it has
+ * to be judged against what is in the store now, not against a snapshot
+ * taken before a 35 minute pass began.
+ *
+ * Real incident: a sync read the import list, spent 35 minutes syncing, and
+ * then delisted 65 products as "Removed from the store upstream" that a push
+ * had added to the store during those same 35 minutes.
+ */
+describe("the delist pass", () => {
+    afterEach(() => jest.restoreAllMocks());
+
+    const entry = (product_id: number) => ({
+        import_list_id: product_id,
+        product_id,
+        product_name: `P${product_id}`,
+        product_image_url: null,
+        import_status: "in_store",
+        store_product_id: String(product_id),
+    });
+
+    function harness(lists: any[][]) {
+        const svc = new StoreSyncService();
+        let call = 0;
+        jest.spyOn(svc as any, "importList").mockImplementation(async () => lists[Math.min(call++, lists.length - 1)]);
+        jest.spyOn(svc, "syncOne").mockResolvedValue(true);
+        const updates: any[] = [];
+        const qb: any = {
+            update: () => qb,
+            set: (v: any) => { updates.push({ set: v }); return qb; },
+            where: () => qb,
+            andWhere: (_sql: string, params: any) => { updates[updates.length - 1].keep = params?.keep; return qb; },
+            execute: async () => ({ affected: 0 }),
+        };
+        (svc as any).productRepo = { createQueryBuilder: () => qb };
+        return { svc, updates, importListCalls: () => call };
+    }
+
+    it("re-reads the import list before deciding what has left the store", async () => {
+        const before = [entry(1), entry(2)];
+        const after = [entry(1), entry(2), entry(3)]; // 3 arrived during the pass
+        const { svc, updates, importListCalls } = harness([before, after]);
+        await (svc as any).runSync(undefined);
+        expect(importListCalls()).toBe(2);
+        // 3 must be in `keep`, or it is delisted the moment it goes on sale.
+        expect(updates[0].keep).toEqual([1, 2, 3]);
+    });
+
+    it("skips delisting entirely rather than delisting against a stale list", async () => {
+        const svc = new StoreSyncService();
+        let call = 0;
+        jest.spyOn(svc as any, "importList").mockImplementation(async () => {
+            if (call++ === 0) return [entry(1)];
+            throw new Error("Zendrop request fetch failed");
+        });
+        jest.spyOn(svc, "syncOne").mockResolvedValue(true);
+        const updates: any[] = [];
+        const qb: any = {
+            update: () => qb, set: (v: any) => { updates.push(v); return qb; },
+            where: () => qb, andWhere: () => qb, execute: async () => ({ affected: 99 }),
+        };
+        (svc as any).productRepo = { createQueryBuilder: () => qb };
+
+        const result = await (svc as any).runSync(undefined);
+        expect(updates).toHaveLength(0);
+        expect(result.delisted).toBe(0);
+    });
+
+    it("does not delist at all on a partial pass", async () => {
+        const { svc, updates } = harness([[entry(1), entry(2)]]);
+        await (svc as any).runSync(1);
+        expect(updates).toHaveLength(0);
+    });
+
+    it("holds the same lock for a push as for a sync, so the two cannot overlap", async () => {
+        // Separate locks let a push add products to the store while a sync
+        // was mid pass, and the sync then delisted every one of them.
+        const src = require("fs").readFileSync(
+            require("path").join(__dirname, "../src/services/shop/store-sync-service.ts"),
+            "utf8",
+        );
+        expect(src).toMatch(/const PUSH_LOCK_KEY = SYNC_LOCK_KEY;/);
+    });
+});

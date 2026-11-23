@@ -34,7 +34,6 @@ export interface CatalogItem {
     categoryId: number | null;
     categoryName: string | null;
     inStock: boolean;
-    estimatedDelivery: string | null;
     /**
      * How many buyable variants there are. The grid only needs to know
      * whether there is a choice to make, and shipping the full arrays with a
@@ -68,7 +67,6 @@ function toItem(p: ShopProduct, withVariants = false): CatalogItem {
         categoryId: p.categoryId,
         categoryName: p.categoryName,
         inStock: p.inStock,
-        estimatedDelivery: p.estimatedDelivery,
         variantCount: variants.length,
         ...(withVariants ? { variants } : {}),
     };

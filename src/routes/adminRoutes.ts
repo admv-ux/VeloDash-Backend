@@ -1704,6 +1704,16 @@ router.post("/shop/reprice", adminRole, adminShopController.repriceAll);
 router.get("/shop/orders", adminRole, adminShopController.listOrders);
 router.get("/shop/orders/summary", adminRole, adminShopController.orderSummary);
 router.patch("/shop/orders/:id", adminRole, adminShopController.updateOrder);
+
+// Fulfilment. Each hop of "paid -> Shopify -> Zendrop -> dispatched" is its
+// own call so a stuck order can be diagnosed and nudged one step at a time.
+// The fulfil route is the only one that spends money, and only on confirm.
+router.get("/shop/fulfillment/status", adminRole, adminShopController.fulfillmentStatus);
+router.get("/shop/fulfillment/tracking", adminRole, adminShopController.trackingEvents);
+router.post("/shop/orders/:id/push", adminRole, adminShopController.pushOrder);
+router.post("/shop/orders/:id/link", adminRole, adminShopController.linkOrder);
+router.post("/shop/orders/:id/fulfill", adminRole, adminShopController.fulfillOrder);
+router.post("/shop/orders/:id/refresh", adminRole, adminShopController.refreshOrder);
 router.get("/shop/merchant-applications", adminRole, adminShopController.listApplications);
 router.patch("/shop/merchant-applications/:id", adminRole, adminShopController.updateApplication);
 

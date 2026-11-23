@@ -6,6 +6,8 @@ import { Like } from "typeorm";
 import { CatalogSyncService } from "../services/shop/catalog-sync-service";
 import { StoreSyncService } from "../services/shop/store-sync-service";
 import { zendropConfigured } from "../services/shop/zendrop-client";
+import { ZendropFulfillmentService, FulfillmentError } from "../services/shop/zendrop-fulfillment-service";
+import { shopifyConfigured, SHOPIFY_DOMAIN } from "../services/shop/shopify-order-service";
 import { retailPriceFor } from "../config/shop-pricing";
 import { MerchantApplicationService, MerchantApplicationError } from "../services/shop/merchant-application-service";
 import { MerchantApplicationStatus } from "../models/merchant-application";
@@ -21,6 +23,7 @@ export class AdminShopController {
     private sync = new CatalogSyncService();
     private storeSync = new StoreSyncService();
     private applications = new MerchantApplicationService();
+    private fulfillment = new ZendropFulfillmentService();
     private productRepo = () => AppDataSource.getRepository(ShopProduct);
     private orderRepo = () => AppDataSource.getRepository(ShopOrder);
 
@@ -261,6 +264,112 @@ export class AdminShopController {
         log.info("Repriced catalogue", { examined: all.length, changed });
         res.json({ examined: all.length, changed });
     };
+
+    // ---- Fulfilment -------------------------------------------------------
+    //
+    // Zendrop has no create_order tool, so a paid order reaches the supplier
+    // only by being written into the connected Shopify store first. These
+    // endpoints expose each hop of that chain separately, because when a
+    // parcel is missing the question is always WHICH hop failed.
+
+    /** Is the chain wired, what does it cost to run, and where is everything stuck. */
+    fulfillmentStatus = async (_req: Request, res: Response) => {
+        const repo = this.orderRepo();
+        const counts: Record<string, number> = {};
+        for (const s of Object.values(ShopFulfillmentStatus)) {
+            counts[s] = await repo.count({ where: { status: ShopOrderStatus.PAID, fulfillmentStatus: s } });
+        }
+        let credit: any = null;
+        let creditError: string | null = null;
+        if (zendropConfigured()) {
+            try {
+                credit = await this.fulfillment.creditBalance();
+            } catch (e) {
+                creditError = (e as Error).message.slice(0, 200);
+            }
+        }
+        res.json({
+            zendropConfigured: zendropConfigured(),
+            shopifyConfigured: shopifyConfigured(),
+            shopifyDomain: SHOPIFY_DOMAIN,
+            paidOrders: await repo.count({ where: { status: ShopOrderStatus.PAID } }),
+            byFulfillmentStatus: counts,
+            zendropCredit: credit,
+            zendropCreditError: creditError,
+        });
+    };
+
+    /** Write a paid order into Shopify so Zendrop can see it. */
+    pushOrder = async (req: Request, res: Response) => {
+        try {
+            const order = await this.fulfillment.pushToStore(req.params.id);
+            res.json({ success: true, order });
+        } catch (e) {
+            this.fail(res, e, "Could not push the order to the store");
+        }
+    };
+
+    /** Look for the order Zendrop ingested from Shopify. */
+    linkOrder = async (req: Request, res: Response) => {
+        try {
+            const order = await this.fulfillment.linkZendropOrder(req.params.id);
+            res.json({ success: true, linked: Boolean(order.zendropOrderId), order });
+        } catch (e) {
+            this.fail(res, e, "Could not look the order up in Zendrop");
+        }
+    };
+
+    /**
+     * Fulfil an order. SPENDS MONEY, and only when `confirm` is true.
+     *
+     * Without confirm it returns the cost and changes nothing, which is what
+     * the dashboard shows before asking.
+     */
+    fulfillOrder = async (req: Request, res: Response) => {
+        try {
+            const out = await this.fulfillment.fulfill(req.params.id, {
+                confirm: req.body?.confirm === true,
+                useCredits: req.body?.useCredits === true,
+            });
+            if (out.dispatched) {
+                log.info("Admin dispatched a fulfilment", {
+                    orderId: req.params.id, cost: out.preview.total, admin: (req as any).user?.id,
+                });
+            }
+            res.json({ success: true, ...out });
+        } catch (e) {
+            this.fail(res, e, "Could not fulfil the order");
+        }
+    };
+
+    /** Re-read status, cost and tracking from Zendrop. */
+    refreshOrder = async (req: Request, res: Response) => {
+        try {
+            const order = await this.fulfillment.refresh(req.params.id);
+            res.json({ success: true, order });
+        } catch (e) {
+            this.fail(res, e, "Could not refresh the order from Zendrop");
+        }
+    };
+
+    /** Carrier scans for one tracking number. */
+    trackingEvents = async (req: Request, res: Response) => {
+        const num = String(req.query.number || "").trim();
+        if (!num) return res.status(400).json({ success: false, message: "A tracking number is required" });
+        try {
+            res.json({ success: true, events: await this.fulfillment.trackingEvents(num) });
+        } catch (e) {
+            this.fail(res, e, "Could not read the tracking history");
+        }
+    };
+
+    private fail(res: Response, e: unknown, fallback: string) {
+        if (e instanceof FulfillmentError) {
+            return res.status(e.statusCode).json({ success: false, message: e.message });
+        }
+        log.error(fallback, { error: (e as Error).message });
+        res.status(502).json({ success: false, message: (e as Error).message || fallback });
+    }
 
     listApplications = async (req: Request, res: Response) => {
         const status = req.query.status as MerchantApplicationStatus | undefined;

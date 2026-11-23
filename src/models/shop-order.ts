@@ -133,8 +133,40 @@ export class ShopOrder {
     @Column({ type: "varchar", length: 100, nullable: true })
     shopifyOrderId: string | null;
 
+    /**
+     * Shopify's own order name, like "#1004".
+     *
+     * Kept because it is the ONLY handle Zendrop can be searched by: its
+     * `get_orders` keyword filter matches the store's order number, not our
+     * VD- code and not the Shopify numeric id. Without this the ingested
+     * order cannot be found again.
+     */
+    @Column({ type: "varchar", length: 32, nullable: true })
+    shopifyOrderName: string | null;
+
     @Column({ type: "integer", nullable: true })
     zendropOrderId: number | null;
+
+    /** Zendrop's own label for the order, verbatim, for support and audit. */
+    @Column({ type: "varchar", length: 32, nullable: true })
+    zendropStatus: string | null;
+
+    /**
+     * What Zendrop actually charged to ship it.
+     *
+     * Recorded separately from the money the customer paid so a loss making
+     * order is visible rather than inferred: retail minus this is the real
+     * margin, and a supplier price rise shows up here first.
+     */
+    @Column({ type: "decimal", precision: 10, scale: 2, nullable: true })
+    fulfillmentCost: number | null;
+
+    /** Carrier tracking, as Zendrop reports it. Empty until the parcel moves. */
+    @Column({ type: "jsonb", default: () => "'[]'::jsonb" })
+    tracking: { number: string; carrier: string | null; url: string | null }[];
+
+    @Column({ type: "timestamp", nullable: true })
+    fulfilledAt: Date | null;
 
     @Column({ type: "text", nullable: true })
     fulfillmentError: string | null;

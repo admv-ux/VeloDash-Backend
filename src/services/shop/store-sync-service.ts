@@ -61,6 +61,30 @@ const MAX_SANE_RETAIL = 2000;
  */
 const SYNC_LOCK_KEY = 848201;
 
+/**
+ * A push pass takes its own lock. It is a different job from a sync and the
+ * two may legitimately overlap, but two push passes would add the same
+ * products twice and burn the same upstream quota doing it.
+ */
+const PUSH_LOCK_KEY = 848202;
+
+/** Pushing to Shopify is asynchronous upstream; it took ~40s in practice. */
+const PUSH_POLL_MS = 3000;
+const PUSH_POLL_MAX = 40;
+
+/**
+ * Why a product is not sellable, in the admin's words rather than the code's.
+ *
+ * Fixed strings rather than free text so the dashboard can group by them and
+ * say "148 of these are one button away from selling, 7 of them are not".
+ */
+export const UNSELLABLE = {
+    NOT_IN_STORE: "Not pushed to the Shopify store",
+    NO_SHIPPING_QUOTE: "Zendrop will not quote shipping for this",
+    NO_VARIANTS: "No variant we can order",
+    LEFT_THE_STORE: "Removed from the store upstream",
+} as const;
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 interface ImportListEntry {
@@ -88,6 +112,19 @@ interface CatalogVariant {
     price: string | number;
     available?: boolean | null;
     inventory_level?: string | null;
+}
+
+export interface PushResult {
+    productId: number;
+    ok: boolean;
+    message: string;
+}
+
+export interface PushSummary {
+    attempted: number;
+    nowSellable: number;
+    failed: number;
+    results: PushResult[];
 }
 
 export interface StoreSyncResult {
@@ -303,6 +340,7 @@ export class StoreSyncService {
         // the admin to see, but never offer it.
         if (!ship) {
             row.isFulfillable = false;
+            row.unsellableReason = UNSELLABLE.NO_SHIPPING_QUOTE;
             row.estimatedDelivery = null;
             await this.productRepo.save(row);
             return false;
@@ -323,6 +361,9 @@ export class StoreSyncService {
 
         if (!variants.length || !row.shopifyProductId || mine?.store_sync_status !== "synced") {
             row.isFulfillable = false;
+            row.unsellableReason = !row.shopifyProductId || mine?.store_sync_status !== "synced"
+                ? UNSELLABLE.NOT_IN_STORE
+                : UNSELLABLE.NO_VARIANTS;
             await this.productRepo.save(row);
             return false;
         }
@@ -335,10 +376,149 @@ export class StoreSyncService {
         row.retailPrice = cheapest.retail;
         row.multiplier = Math.round((cheapest.retail / Math.max(cheapest.landedCost, 0.01)) * 100) / 100;
         row.isFulfillable = true;
+        row.unsellableReason = null;
         if (existing === null) row.isActive = true;
 
         await this.productRepo.save(row);
         return true;
+    }
+
+    /**
+     * Put catalogue products into the Shopify store so they can be sold.
+     *
+     * This is the fix for the largest group of unsellable rows. Zendrop will
+     * only fulfil an order whose line items it can match back to products in
+     * the connected store, so a row that exists in our catalogue but not in
+     * the store is a listing we could take money for and never dispatch, and
+     * is held back for exactly that reason. Pushing it to the store is what
+     * turns it into something we can actually sell.
+     *
+     * Three upstream steps per product: add it to the import list, push the
+     * import list entry to the store, then wait for Shopify to acknowledge
+     * it. Only then is it worth syncing, because the price and the variants
+     * come from the store side.
+     */
+    async pushToStore(productIds: number[]): Promise<PushSummary> {
+        const results: PushResult[] = [];
+        if (productIds.length === 0) return { attempted: 0, nowSellable: 0, failed: 0, results };
+
+        // One listing for the whole batch. Paging the import list per product
+        // would be the same few hundred calls over and over at an upstream
+        // that rate limits sustained traffic.
+        const byProduct = new Map<number, ImportListEntry>();
+        for (const e of await this.importList()) byProduct.set(e.product_id, e);
+
+        const absent = productIds.filter((id) => !byProduct.has(id));
+        for (const id of absent) {
+            try {
+                await callZendropTool("add_my_product", { product_id: id, store_id: STORE_ID });
+            } catch (e) {
+                log.warn("add_my_product failed", { productId: id, error: (e as Error).message });
+            }
+            await sleep(CALL_GAP_MS);
+        }
+        // add_my_product answers with a message and no id, so the list has to
+        // be read again to learn what the new entries are called.
+        if (absent.length) {
+            for (const e of await this.importList()) byProduct.set(e.product_id, e);
+        }
+
+        for (const id of productIds) {
+            const entry = byProduct.get(id);
+            if (!entry) {
+                results.push({ productId: id, ok: false, message: "Zendrop would not add this to the import list" });
+                continue;
+            }
+            try {
+                // A copy, never the listing's own object: the entry map is
+                // shared across the whole batch and a half-updated entry left
+                // behind by a product that then failed would be read as
+                // in-store by anything that looked at it later.
+                let pushed = entry;
+                if (entry.import_status !== "in_store" || !entry.store_product_id) {
+                    const started = await callZendropTool<{ operation_id: number }>("import_my_product", {
+                        import_list_id: entry.import_list_id,
+                    });
+                    await sleep(CALL_GAP_MS);
+                    const done = await this.awaitImport(Number(started?.operation_id || entry.import_list_id));
+                    if (!done.ok) {
+                        results.push({ productId: id, ok: false, message: done.message });
+                        continue;
+                    }
+                    pushed = { ...entry, store_product_id: done.storeProductId, import_status: "in_store" };
+                }
+                const sellable = await this.syncOne(pushed);
+                results.push({
+                    productId: id,
+                    ok: sellable,
+                    message: sellable ? "On sale" : "In the store, but still not sellable",
+                });
+            } catch (e) {
+                results.push({ productId: id, ok: false, message: (e as Error).message.slice(0, 200) });
+            }
+        }
+
+        const summary: PushSummary = {
+            attempted: productIds.length,
+            nowSellable: results.filter((r) => r.ok).length,
+            failed: results.filter((r) => !r.ok).length,
+            results,
+        };
+        log.info("Push to store finished", { attempted: summary.attempted, nowSellable: summary.nowSellable, failed: summary.failed });
+        return summary;
+    }
+
+    /** Wait for Shopify to acknowledge one product, or give up saying so. */
+    private async awaitImport(operationId: number): Promise<{ ok: boolean; storeProductId: string | null; message: string }> {
+        for (let i = 0; i < PUSH_POLL_MAX; i++) {
+            const st = await callZendropTool<{
+                status: string;
+                store_product_id: string | number | null;
+                failed_reason: string | null;
+            }>("get_my_product_import_operation", { operation_id: operationId });
+
+            if (st?.status === "completed") {
+                return {
+                    ok: true,
+                    storeProductId: st.store_product_id ? String(st.store_product_id) : null,
+                    message: "Pushed to the store",
+                };
+            }
+            if (st?.status === "failed" || st?.failed_reason) {
+                return { ok: false, storeProductId: null, message: st?.failed_reason || "Zendrop could not push it to the store" };
+            }
+            await sleep(PUSH_POLL_MS);
+        }
+        // Not a failure, just slower than we will wait for. The next store
+        // sync picks it up once Shopify finishes.
+        return { ok: false, storeProductId: null, message: "Still being pushed to the store; it will appear after the next sync" };
+    }
+
+    /**
+     * Push every product that is held back only because it is not in the
+     * store, under a lock so two replicas cannot both do it.
+     */
+    async pushAllNotInStore(limit?: number): Promise<PushSummary> {
+        const runner = AppDataSource.createQueryRunner();
+        await runner.connect();
+        try {
+            const [lock] = await runner.query("SELECT pg_try_advisory_lock($1) AS ok", [PUSH_LOCK_KEY]);
+            if (!lock?.ok) {
+                return { attempted: 0, nowSellable: 0, failed: 0, results: [{ productId: 0, ok: false, message: "A push is already running" }] };
+            }
+            try {
+                const rows = await this.productRepo.find({
+                    where: { isActive: true, isFulfillable: false, unsellableReason: UNSELLABLE.NOT_IN_STORE },
+                    order: { retailPrice: "DESC" },
+                    ...(limit && limit > 0 ? { take: limit } : {}),
+                });
+                return await this.pushToStore(rows.map((r) => r.zendropProductId));
+            } finally {
+                await runner.query("SELECT pg_advisory_unlock($1)", [PUSH_LOCK_KEY]);
+            }
+        } finally {
+            await runner.release();
+        }
     }
 
     /**
@@ -408,7 +588,7 @@ export class StoreSyncService {
             const stale = await this.productRepo
                 .createQueryBuilder()
                 .update(ShopProduct)
-                .set({ isFulfillable: false })
+                .set({ isFulfillable: false, unsellableReason: UNSELLABLE.LEFT_THE_STORE })
                 .where("isFulfillable = true")
                 .andWhere(keep.length ? "zendropProductId NOT IN (:...keep)" : "1 = 1", { keep })
                 .execute();

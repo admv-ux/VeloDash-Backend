@@ -1,4 +1,4 @@
-import { StoreSyncService } from "../src/services/shop/store-sync-service";
+import { StoreSyncService, UNSELLABLE } from "../src/services/shop/store-sync-service";
 import { AppDataSource } from "../src/db/data-source";
 import { retailPriceFor } from "../src/config/shop-pricing";
 
@@ -287,5 +287,196 @@ describe("syncStore locking", () => {
         await expect(s.syncStore()).rejects.toThrow("upstream down");
         expect(String(calls[1][0])).toMatch(/pg_advisory_unlock/);
         expect(released).toBe(1);
+    });
+});
+
+/**
+ * Why a product cannot be sold has to be recorded, not just that it cannot.
+ * The dashboard could previously only say "155 cannot be shipped", which is
+ * a number nobody can act on: 148 of those were one button away from selling
+ * and 7 were never going to.
+ */
+describe("unsellableReason", () => {
+    const entry = { import_list_id: 1, product_id: 7, product_name: "Thing", product_image_url: null, import_status: "in_store", store_product_id: "999" };
+
+    function harness(responses: Record<string, any>) {
+        const s = svc();
+        const saved: any[] = [];
+        (s as any).productRepo = {
+            findOne: jest.fn().mockResolvedValue(null),
+            create: jest.fn().mockImplementation((d: any) => ({ ...d })),
+            save: jest.fn().mockImplementation(async (r: any) => { saved.push({ ...r }); return r; }),
+        };
+        (s as any).categoryRepo = {
+            findOne: jest.fn().mockResolvedValue(null),
+            create: jest.fn().mockImplementation((d: any) => ({ ...d })),
+            save: jest.fn().mockResolvedValue(undefined),
+        };
+        jest.spyOn(require("../src/services/shop/zendrop-client"), "callZendropTool")
+            .mockImplementation(async (tool: any) => responses[tool as string]);
+        return { s, saved };
+    }
+
+    afterEach(() => jest.restoreAllMocks());
+
+    const ok = {
+        get_my_product: { store_product_id: "999", store_sync_status: "synced", zendrop_linked: true, variants: [sv("1", "A")] },
+        get_catalog_product: { id: 7, name: "Thing", price: "10.00", images: [], variants: [{ variant_id: 1, sku: "A", price: "10.00" }], availability: { in_stock: true } },
+        get_catalog_shipping_estimate: { shipping_options: [{ type: "regular", price: 5, estimated_delivery: "6 days" }] },
+    };
+
+    it("clears the reason once a product is sellable", async () => {
+        const { s, saved } = harness(ok);
+        await s.syncOne(entry as any);
+        expect(saved[0].isFulfillable).toBe(true);
+        expect(saved[0].unsellableReason).toBeNull();
+    });
+
+    it("blames the missing shipping quote when there is none", async () => {
+        const { s, saved } = harness({ ...ok, get_catalog_shipping_estimate: { shipping_options: [] } });
+        await s.syncOne(entry as any);
+        expect(saved[0].unsellableReason).toBe(UNSELLABLE.NO_SHIPPING_QUOTE);
+    });
+
+    it("blames the store when the product is not in it", async () => {
+        const { s, saved } = harness({ ...ok, get_my_product: { ...ok.get_my_product, store_product_id: null } });
+        await s.syncOne(entry as any);
+        expect(saved[0].unsellableReason).toBe(UNSELLABLE.NOT_IN_STORE);
+    });
+
+    it("blames the store while Shopify is still syncing it", async () => {
+        const { s, saved } = harness({ ...ok, get_my_product: { ...ok.get_my_product, store_sync_status: "pending" } });
+        await s.syncOne(entry as any);
+        expect(saved[0].unsellableReason).toBe(UNSELLABLE.NOT_IN_STORE);
+    });
+
+    it("blames the variants when the product IS in the store but none can be ordered", async () => {
+        const { s, saved } = harness({ ...ok, get_my_product: { ...ok.get_my_product, variants: [] } });
+        await s.syncOne(entry as any);
+        expect(saved[0].unsellableReason).toBe(UNSELLABLE.NO_VARIANTS);
+    });
+});
+
+/**
+ * Pushing a product into the Shopify store is the fix for the largest group
+ * of unsellable rows. Zendrop only fulfils what the store carries, so this
+ * is the difference between a listing we can dispatch and one we cannot.
+ */
+describe("pushToStore", () => {
+    afterEach(() => jest.restoreAllMocks());
+
+    const inList = { import_list_id: 50, product_id: 7, product_name: "Thing", product_image_url: null, import_status: "imported", store_product_id: null };
+
+    function harness(opts: { lists: any[][]; tools: Record<string, any>; syncResult?: boolean }) {
+        const s = svc();
+        const calls: Array<{ tool: string; args: any }> = [];
+        let listCall = 0;
+        jest.spyOn(s as any, "importList").mockImplementation(async () => opts.lists[Math.min(listCall++, opts.lists.length - 1)]);
+        const syncOne = jest.spyOn(s, "syncOne").mockResolvedValue(opts.syncResult ?? true);
+        jest.spyOn(require("../src/services/shop/zendrop-client"), "callZendropTool")
+            .mockImplementation(async (tool: any, args: any) => {
+                calls.push({ tool, args });
+                return opts.tools[tool as string];
+            });
+        return { s, calls, syncOne };
+    }
+
+    it("does nothing, and talks to nobody, for an empty list", async () => {
+        const { s, calls } = harness({ lists: [[]], tools: {} });
+        await expect(s.pushToStore([])).resolves.toEqual({ attempted: 0, nowSellable: 0, failed: 0, results: [] });
+        expect(calls).toHaveLength(0);
+    });
+
+    it("adds a product that is not in the import list, pushes it, then syncs it", async () => {
+        const { s, calls, syncOne } = harness({
+            lists: [[], [inList]],
+            tools: {
+                add_my_product: { message: "Product successfully added to your import list." },
+                import_my_product: { operation_id: 50, status: "pending" },
+                get_my_product_import_operation: { status: "completed", store_product_id: "15562188685405", failed_reason: null },
+            },
+        });
+        const summary = await s.pushToStore([7]);
+        expect(calls.map((c) => c.tool)).toEqual(["add_my_product", "import_my_product", "get_my_product_import_operation"]);
+        expect(calls[0].args.product_id).toBe(7);
+        expect(calls[1].args.import_list_id).toBe(50);
+        expect(syncOne).toHaveBeenCalledTimes(1);
+        // The store id Shopify handed back must reach syncOne, or the row is
+        // written as "not in store" straight after being put in the store.
+        expect(syncOne.mock.calls[0][0].store_product_id).toBe("15562188685405");
+        expect(summary).toMatchObject({ attempted: 1, nowSellable: 1, failed: 0 });
+    });
+
+    it("does not add a product that is already in the import list", async () => {
+        const { s, calls } = harness({
+            lists: [[inList]],
+            tools: {
+                import_my_product: { operation_id: 50 },
+                get_my_product_import_operation: { status: "completed", store_product_id: "1", failed_reason: null },
+            },
+        });
+        await s.pushToStore([7]);
+        expect(calls.map((c) => c.tool)).not.toContain("add_my_product");
+    });
+
+    it("skips straight to syncing a product already in the store", async () => {
+        const { s, calls, syncOne } = harness({
+            lists: [[{ ...inList, import_status: "in_store", store_product_id: "999" }]],
+            tools: {},
+        });
+        const summary = await s.pushToStore([7]);
+        expect(calls).toHaveLength(0);
+        expect(syncOne).toHaveBeenCalledTimes(1);
+        expect(summary.nowSellable).toBe(1);
+    });
+
+    it("reports a refused push and does not pretend it synced", async () => {
+        const { s, syncOne } = harness({
+            lists: [[inList]],
+            tools: {
+                import_my_product: { operation_id: 50 },
+                get_my_product_import_operation: { status: "failed", store_product_id: null, failed_reason: "Shopify rejected the product" },
+            },
+        });
+        const summary = await s.pushToStore([7]);
+        expect(syncOne).not.toHaveBeenCalled();
+        expect(summary).toMatchObject({ attempted: 1, nowSellable: 0, failed: 1 });
+        expect(summary.results[0].message).toBe("Shopify rejected the product");
+    });
+
+    it("says so when Zendrop will not even put it on the import list", async () => {
+        const { s, syncOne } = harness({
+            lists: [[], []],
+            tools: { add_my_product: { message: "nope" } },
+        });
+        const summary = await s.pushToStore([7]);
+        expect(syncOne).not.toHaveBeenCalled();
+        expect(summary.failed).toBe(1);
+        expect(summary.results[0].message).toMatch(/import list/i);
+    });
+
+    it("counts a product that reaches the store but still cannot be sold as a failure", async () => {
+        const { s } = harness({
+            lists: [[{ ...inList, import_status: "in_store", store_product_id: "999" }]],
+            tools: {},
+            syncResult: false,
+        });
+        const summary = await s.pushToStore([7]);
+        expect(summary).toMatchObject({ nowSellable: 0, failed: 1 });
+        expect(summary.results[0].message).toMatch(/still not sellable/i);
+    });
+
+    it("keeps going after one product throws", async () => {
+        const s = svc();
+        jest.spyOn(s as any, "importList").mockResolvedValue([
+            { ...inList, product_id: 7, import_status: "in_store", store_product_id: "a" },
+            { ...inList, product_id: 8, import_status: "in_store", store_product_id: "b" },
+        ]);
+        jest.spyOn(s, "syncOne")
+            .mockRejectedValueOnce(new Error("upstream exploded"))
+            .mockResolvedValueOnce(true);
+        const summary = await s.pushToStore([7, 8]);
+        expect(summary).toMatchObject({ attempted: 2, nowSellable: 1, failed: 1 });
+        expect(summary.results[0].message).toBe("upstream exploded");
     });
 });

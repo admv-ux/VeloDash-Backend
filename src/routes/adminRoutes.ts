@@ -1695,6 +1695,8 @@ router.delete("/categories/:id", adminRole, adminController.deleteCategory);
 router.get("/shop/status", adminRole, adminShopController.status);
 router.get("/shop/products", adminRole, adminShopController.listProducts);
 router.patch("/shop/products/:id", adminRole, adminShopController.updateProduct);
+router.post("/shop/products/:id/push", adminRole, adminShopController.pushProduct);
+router.post("/shop/push-unsellable", adminRole, adminShopController.pushUnsellable);
 router.post("/shop/sync/categories", adminRole, adminShopController.syncCategories);
 // The sync that decides what the shop can sell: a full pass can take several
 // minutes, because Zendrop rate limits a sustained run.

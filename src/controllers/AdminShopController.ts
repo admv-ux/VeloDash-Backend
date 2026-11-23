@@ -4,7 +4,7 @@ import { ShopProduct } from "../models/shop-product";
 import { ShopOrder, ShopOrderStatus, ShopFulfillmentStatus } from "../models/shop-order";
 import { Like } from "typeorm";
 import { CatalogSyncService } from "../services/shop/catalog-sync-service";
-import { StoreSyncService } from "../services/shop/store-sync-service";
+import { StoreSyncService, UNSELLABLE } from "../services/shop/store-sync-service";
 import { zendropConfigured } from "../services/shop/zendrop-client";
 import { ZendropFulfillmentService, FulfillmentError } from "../services/shop/zendrop-fulfillment-service";
 import { shopifyConfigured, SHOPIFY_DOMAIN } from "../services/shop/shopify-order-service";
@@ -108,13 +108,38 @@ export class AdminShopController {
             repo.count({ where: { isActive: true, isFulfillable: true } }),
         ]);
         const last = await repo.findOne({ where: {}, order: { lastSyncedAt: "DESC" } });
+        // A bare "155 cannot be shipped" is not something anyone can act on.
+        // Grouped by reason it says which of them are one button away from
+        // selling and which are never going to sell.
+        const reasons: { reason: string; count: number }[] = (
+            await repo
+                .createQueryBuilder("p")
+                .select("COALESCE(p.unsellableReason, 'Not yet diagnosed')", "reason")
+                .addSelect("COUNT(*)::int", "count")
+                .where("p.isActive = true AND p.isFulfillable = false")
+                .groupBy("COALESCE(p.unsellableReason, 'Not yet diagnosed')")
+                .orderBy("2", "DESC")
+                .getRawMany()
+        ).map((r) => ({ reason: String(r.reason), count: Number(r.count) }));
+        const pushable = await repo.count({
+            where: { isActive: true, isFulfillable: false, unsellableReason: UNSELLABLE.NOT_IN_STORE },
+        });
         res.json({
             configured: zendropConfigured(),
             // `sellable` is the number the storefront actually shows. It is
             // separate from `active` because a product can be switched on here
             // and still be unshippable, which is exactly the gap that let the
             // shop list 148 products it could not dispatch one of.
-            products: { total, active, sellable: fulfillable, unsellable: active - fulfillable, hidden: total - active },
+            products: {
+                total,
+                active,
+                sellable: fulfillable,
+                unsellable: active - fulfillable,
+                hidden: total - active,
+                reasons,
+                /** How many of the unsellable ones a push to the store would fix. */
+                pushable,
+            },
             lastSyncedAt: last?.lastSyncedAt ?? null,
         });
     };
@@ -180,12 +205,99 @@ export class AdminShopController {
         }
     };
 
+    /**
+     * POST /shop/products/:id/push
+     *
+     * Put one product into the Shopify store so it can be sold. Answers with
+     * the outcome, because the admin pressed a button on one row and wants to
+     * know whether that row is now on sale.
+     */
+    pushProduct = async (req: Request, res: Response) => {
+        if (!zendropConfigured()) {
+            res.status(503).json({ message: "Zendrop is not configured" });
+            return;
+        }
+        const product = await this.productRepo().findOne({ where: { id: req.params.id } });
+        if (!product) {
+            res.status(404).json({ message: "Product not found" });
+            return;
+        }
+        try {
+            const summary = await this.storeSync.pushToStore([product.zendropProductId]);
+            const result = summary.results[0];
+            const fresh = await this.productRepo().findOne({ where: { id: product.id } });
+            res.json({
+                ok: !!result?.ok,
+                message: result?.message || "Nothing happened",
+                product: fresh
+                    ? {
+                          id: fresh.id,
+                          isFulfillable: fresh.isFulfillable,
+                          unsellableReason: fresh.unsellableReason,
+                          retailPrice: Number(fresh.retailPrice),
+                          shopifyProductId: fresh.shopifyProductId,
+                      }
+                    : null,
+            });
+        } catch (e) {
+            log.error("pushProduct failed", { id: req.params.id, error: (e as Error).message });
+            res.status(502).json({ message: (e as Error).message });
+        }
+    };
+
+    /**
+     * POST /shop/push-unsellable
+     *
+     * Push every product held back only because it is not in the store.
+     *
+     * Started in the background and answered immediately: each product needs
+     * three upstream calls and up to two minutes of waiting on Shopify, so a
+     * hundred of them outlasts any sensible request timeout. Progress is read
+     * off /shop/status, where the unsellable count falls as it goes.
+     */
+    pushUnsellable = async (req: Request, res: Response) => {
+        if (!zendropConfigured()) {
+            res.status(503).json({ message: "Zendrop is not configured" });
+            return;
+        }
+        const limit = req.query.limit === undefined ? undefined : Number(req.query.limit);
+        if (limit !== undefined && (!Number.isInteger(limit) || limit < 1)) {
+            res.status(400).json({ message: "limit must be a positive integer" });
+            return;
+        }
+        const pending = await this.productRepo().count({
+            where: { isActive: true, isFulfillable: false, unsellableReason: UNSELLABLE.NOT_IN_STORE },
+        });
+        if (pending === 0) {
+            res.json({ started: false, queued: 0, message: "Nothing is waiting to be pushed to the store" });
+            return;
+        }
+        const queued = limit ? Math.min(limit, pending) : pending;
+
+        void this.storeSync
+            .pushAllNotInStore(limit)
+            .then((r) => log.info("Background push finished", { attempted: r.attempted, nowSellable: r.nowSellable, failed: r.failed }))
+            .catch((e) => log.error("Background push failed", { error: (e as Error).message }));
+
+        res.status(202).json({
+            started: true,
+            queued,
+            message: `Pushing ${queued} product${queued === 1 ? "" : "s"} to the store. This takes about a minute each; the catalogue updates as it goes.`,
+        });
+    };
+
     /** Full rows including cost and margin, for the admin table. */
     listProducts = async (req: Request, res: Response) => {
         const page = Math.max(1, Number(req.query.page) || 1);
         const limit = Math.min(200, Number(req.query.limit) || 50);
         const qb = this.productRepo().createQueryBuilder("p").orderBy("p.updatedAt", "DESC");
         if (req.query.search) qb.andWhere("p.name ILIKE :s", { s: `%${req.query.search}%` });
+        // "Show me the ones I cannot ship" is the question this table is
+        // opened to answer, so it is a filter rather than 9 pages of paging.
+        if (req.query.state === "unsellable") qb.andWhere("p.isActive = true AND p.isFulfillable = false");
+        if (req.query.state === "sellable") qb.andWhere("p.isActive = true AND p.isFulfillable = true");
+        if (req.query.state === "hidden") qb.andWhere("p.isActive = false");
+        if (req.query.reason) qb.andWhere("p.unsellableReason = :r", { r: String(req.query.reason) });
         const [rows, total] = await qb.skip((page - 1) * limit).take(limit).getManyAndCount();
         res.json({
             total,
@@ -206,6 +318,7 @@ export class AdminShopController {
                 inStock: p.inStock,
                 isActive: p.isActive,
                 isFulfillable: p.isFulfillable,
+                unsellableReason: p.unsellableReason,
                 shopifyProductId: p.shopifyProductId,
                 variants: (p.variants || []).map((v) => ({
                     title: v.title,

@@ -97,6 +97,17 @@ export class ShopProduct {
     @Index()
     isFulfillable: boolean;
 
+    /**
+     * Why this product cannot be sold, in words an admin can act on.
+     *
+     * Null whenever isFulfillable is true. Without it the dashboard could
+     * only report a number, and "155 cannot be shipped" tells the owner
+     * nothing about whether that is 155 things to push to the store or 155
+     * things Zendrop will never ship.
+     */
+    @Column({ type: "varchar", length: 120, nullable: true })
+    unsellableReason: string | null;
+
     @Column({ type: "varchar", length: 500 })
     name: string;
 

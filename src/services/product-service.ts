@@ -636,10 +636,18 @@ export class ProductService {
 
         if (params.category) {
             const { slugs, isType } = await this.resolveCategorySlugs(params.category);
-            if (slugs.length === 1) {
-                qb.andWhere("product.category = :category", { category: slugs[0] });
+            // Case insensitive, because product.category is free text a
+            // merchant typed while the category slugs are lower case. 190 of
+            // the 238 live listings were stored as "Marketplace", "Food" or
+            // "Pharmacy" and matched no slug at all, so they were invisible
+            // in every category filtered screen in the app, which is most of
+            // them. Matching on case rather than on meaning hid four out of
+            // every five products in the shop.
+            const wanted = slugs.map((slug) => slug.toLowerCase());
+            if (wanted.length === 1) {
+                qb.andWhere("LOWER(product.category) = :category", { category: wanted[0] });
             } else {
-                qb.andWhere("product.category IN (:...categorySlugs)", { categorySlugs: slugs });
+                qb.andWhere("LOWER(product.category) IN (:...categorySlugs)", { categorySlugs: wanted });
             }
             log.info(`[getProducts] category="${params.category}" isType=${isType} → filtering by slugs: [${slugs.join(", ")}]`);
         }

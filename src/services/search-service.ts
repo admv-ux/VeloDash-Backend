@@ -298,7 +298,8 @@ export class SearchService {
 
         // Category filter
         if (params.category) {
-            qb = qb.andWhere("p.category = :cat", { cat: params.category });
+            // Same reason as product-service: the stored category is free text.
+            qb = qb.andWhere("LOWER(p.category) = LOWER(:cat)", { cat: params.category });
         }
 
         // Geo filter via merchant location

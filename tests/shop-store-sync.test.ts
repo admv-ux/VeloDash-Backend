@@ -565,3 +565,84 @@ describe("the delist pass", () => {
         expect(src).toMatch(/const PUSH_LOCK_KEY = SYNC_LOCK_KEY;/);
     });
 });
+
+/**
+ * The endpoint behind the admin's "Push all" button must not claim to have
+ * started something the lock then refuses. It did exactly that: it answered
+ * "Pushing 53 products" and a sync holding the lock turned the push away a
+ * second later, so the admin saw a success message and nothing happened.
+ */
+describe("starting a bulk push", () => {
+    // createQueryRunner lives on DataSource.prototype, so spyOn cannot see it
+    // on the instance; it is swapped out and put back by hand.
+    const realCreateQueryRunner = AppDataSource.createQueryRunner;
+    afterEach(() => {
+        (AppDataSource as any).createQueryRunner = realCreateQueryRunner;
+        jest.restoreAllMocks();
+    });
+
+    function harness(lockGranted: boolean, rowCount = 3) {
+        const queries: string[] = [];
+        let released = false;
+        const runner: any = {
+            connect: jest.fn().mockResolvedValue(undefined),
+            query: jest.fn(async (sql: string) => {
+                queries.push(sql);
+                if (sql.includes("pg_try_advisory_lock")) return [{ ok: lockGranted }];
+                return [{}];
+            }),
+            release: jest.fn(async () => { released = true; }),
+        };
+        (AppDataSource as any).createQueryRunner = () => runner;
+
+        const svc = new StoreSyncService();
+        (svc as any).productRepo = {
+            find: jest.fn().mockResolvedValue(
+                Array.from({ length: rowCount }, (_, i) => ({ zendropProductId: 100 + i })),
+            ),
+        };
+        const push = jest.spyOn(svc, "pushToStore").mockResolvedValue({ attempted: rowCount, nowSellable: rowCount, failed: 0, results: [] });
+        return { svc, runner, queries, push, wasReleased: () => released };
+    }
+
+    it("says it did not start when a sync holds the lock, and queues nothing", async () => {
+        const { svc, push, wasReleased } = harness(false);
+        await expect(svc.startPushAllNotInStore()).resolves.toEqual({ started: false, queued: 0 });
+        expect(push).not.toHaveBeenCalled();
+        expect(wasReleased()).toBe(true);
+    });
+
+    it("reports the real queue size and starts the work", async () => {
+        const { svc, push } = harness(true, 5);
+        const res = await svc.startPushAllNotInStore();
+        expect(res).toEqual({ started: true, queued: 5 });
+        expect(push).toHaveBeenCalledWith([100, 101, 102, 103, 104]);
+    });
+
+    it("returns before the push finishes, rather than waiting out an hour of work", async () => {
+        const { svc } = harness(true, 2);
+        let settled = false;
+        jest.spyOn(svc, "pushToStore").mockImplementation(
+            () => new Promise((r) => setTimeout(() => { settled = true; r({ attempted: 2, nowSellable: 2, failed: 0, results: [] }); }, 50)),
+        );
+        const res = await svc.startPushAllNotInStore();
+        expect(res.started).toBe(true);
+        expect(settled).toBe(false);
+    });
+
+    it("releases the lock once the work is done, not before", async () => {
+        const { svc, queries, wasReleased } = harness(true, 1);
+        await svc.startPushAllNotInStore();
+        expect(queries.some((q) => q.includes("pg_advisory_unlock"))).toBe(false);
+        await new Promise((r) => setImmediate(r));
+        await new Promise((r) => setImmediate(r));
+        expect(queries.some((q) => q.includes("pg_advisory_unlock"))).toBe(true);
+        expect(wasReleased()).toBe(true);
+    });
+
+    it("honours a limit", async () => {
+        const { svc } = harness(true, 2);
+        const res = await svc.startPushAllNotInStore(2);
+        expect(res.queued).toBe(2);
+    });
+});

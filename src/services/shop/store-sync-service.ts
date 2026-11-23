@@ -505,26 +505,59 @@ export class StoreSyncService {
      * Push every product that is held back only because it is not in the
      * store, under a lock so two replicas cannot both do it.
      */
-    async pushAllNotInStore(limit?: number): Promise<PushSummary> {
+    /**
+     * Start a push of everything held back only because it is not in the
+     * store, and report whether it actually started.
+     *
+     * The lock is taken before this returns, on purpose. The endpoint used to
+     * answer "Pushing 53 products" and only then discover that a sync held
+     * the lock, so the admin saw a success message for a push that never ran
+     * and nothing changed. Whoever calls this learns the truth before they
+     * tell anyone, and the work itself continues in the background.
+     */
+    async startPushAllNotInStore(limit?: number): Promise<{ started: boolean; queued: number }> {
         const runner = AppDataSource.createQueryRunner();
         await runner.connect();
+
+        let holding = false;
         try {
             const [lock] = await runner.query("SELECT pg_try_advisory_lock($1) AS ok", [PUSH_LOCK_KEY]);
-            if (!lock?.ok) {
-                return { attempted: 0, nowSellable: 0, failed: 0, results: [{ productId: 0, ok: false, message: "A catalogue sync or push is already running. Try again when it finishes." }] };
-            }
-            try {
-                const rows = await this.productRepo.find({
-                    where: { isActive: true, isFulfillable: false, unsellableReason: UNSELLABLE.NOT_IN_STORE },
-                    order: { retailPrice: "DESC" },
-                    ...(limit && limit > 0 ? { take: limit } : {}),
+            if (!lock?.ok) return { started: false, queued: 0 };
+            holding = true;
+
+            const rows = await this.productRepo.find({
+                where: { isActive: true, isFulfillable: false, unsellableReason: UNSELLABLE.NOT_IN_STORE },
+                order: { retailPrice: "DESC" },
+                ...(limit && limit > 0 ? { take: limit } : {}),
+            });
+            const ids = rows.map((r) => r.zendropProductId);
+
+            // Deliberately not awaited. The lock and the connection are
+            // released by this chain, not by the caller, so the caller may
+            // return the moment it knows the push is its to run.
+            void this.pushToStore(ids)
+                .then((r) => log.info("Push to store finished", { attempted: r.attempted, nowSellable: r.nowSellable, failed: r.failed }))
+                .catch((e) => log.error("Push to store failed", { error: (e as Error).message }))
+                .finally(async () => {
+                    try {
+                        await runner.query("SELECT pg_advisory_unlock($1)", [PUSH_LOCK_KEY]);
+                    } catch (e) {
+                        log.warn("Could not release the push lock", { error: (e as Error).message });
+                    }
+                    await runner.release().catch(() => {});
                 });
-                return await this.pushToStore(rows.map((r) => r.zendropProductId));
-            } finally {
-                await runner.query("SELECT pg_advisory_unlock($1)", [PUSH_LOCK_KEY]);
+
+            return { started: true, queued: ids.length };
+        } catch (e) {
+            if (holding) {
+                await runner.query("SELECT pg_advisory_unlock($1)", [PUSH_LOCK_KEY]).catch(() => {});
             }
+            await runner.release().catch(() => {});
+            throw e;
         } finally {
-            await runner.release();
+            // Only the path that did NOT hand the runner to the background
+            // chain releases it here.
+            if (!holding) await runner.release().catch(() => {});
         }
     }
 

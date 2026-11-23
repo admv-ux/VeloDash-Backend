@@ -272,18 +272,30 @@ export class AdminShopController {
             res.json({ started: false, queued: 0, message: "Nothing is waiting to be pushed to the store" });
             return;
         }
-        const queued = limit ? Math.min(limit, pending) : pending;
 
-        void this.storeSync
-            .pushAllNotInStore(limit)
-            .then((r) => log.info("Background push finished", { attempted: r.attempted, nowSellable: r.nowSellable, failed: r.failed }))
-            .catch((e) => log.error("Background push failed", { error: (e as Error).message }));
-
-        res.status(202).json({
-            started: true,
-            queued,
-            message: `Pushing ${queued} product${queued === 1 ? "" : "s"} to the store. This takes about a minute each; the catalogue updates as it goes.`,
-        });
+        try {
+            // Waits only for the lock, not for the work, so the answer can
+            // say whether the push is really running. It used to report
+            // "Pushing 53 products" and then be refused by a sync holding
+            // the lock, which read as a button that did nothing.
+            const { started, queued } = await this.storeSync.startPushAllNotInStore(limit);
+            if (!started) {
+                res.status(409).json({
+                    started: false,
+                    queued: 0,
+                    message: "A catalogue sync is running. Try again when it finishes, in about half an hour.",
+                });
+                return;
+            }
+            res.status(202).json({
+                started: true,
+                queued,
+                message: `Pushing ${queued} product${queued === 1 ? "" : "s"} to the store. This takes about a minute each; the catalogue updates as it goes.`,
+            });
+        } catch (e) {
+            log.error("pushUnsellable failed to start", { error: (e as Error).message });
+            res.status(500).json({ message: "Could not start the push" });
+        }
     };
 
     /** Full rows including cost and margin, for the admin table. */

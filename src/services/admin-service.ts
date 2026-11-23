@@ -999,7 +999,9 @@ export class AdminService {
     }
 
     async createProduct(merchantId: string, input: CreateProductInput) {
-        const product = await this.productService.createProduct(merchantId, input);
+        // The admin is not held to the merchant category list: see
+        // MERCHANT_LISTABLE_CATEGORIES in product-service.
+        const product = await this.productService.createProduct(merchantId, input, { allowAnyCategory: true });
         log.info("Admin created product", { productId: product.id, merchantId });
         return product;
     }

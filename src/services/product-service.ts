@@ -39,6 +39,27 @@ function withMerchantCurrency<T extends { currency?: string; merchant?: { countr
     return product;
 }
 
+/**
+ * The only categories a merchant may put a new listing under.
+ *
+ * Food, groceries and pharmacy, and nothing else. General merchandise and
+ * professional services were both withdrawn: a merchant can no longer list
+ * electronics, clothing or a service, nor apply for a category of their own.
+ * Listings created before this stay exactly as they are; this gate is on
+ * creation only.
+ *
+ * The seller app shows the same three buckets. If you change one list, change
+ * the other, or the picker offers something the server then refuses.
+ */
+export const MERCHANT_LISTABLE_CATEGORIES: readonly string[] = [
+    "food", "catering", "bakery", "beverages",
+    "grocery", "fresh produce", "dairy", "frozen",
+    "pharmacy", "supplements", "medical supplies", "beauty & skincare",
+];
+
+const listable = (category: string): boolean =>
+    MERCHANT_LISTABLE_CATEGORIES.includes(category.trim().toLowerCase());
+
 // ── Input Types ─────────────────────────────────────────────────────
 
 export interface CreateProductInput {
@@ -205,38 +226,32 @@ export class ProductService {
         return [...enumFallback, ...pendingRows.map(toDto)];
     }
 
-    /**
-     * Merchant-submitted category suggestion.
-     * Created with isActive=false - admin must approve before it appears publicly.
-     * If the category already exists but is inactive (pending review), returns it silently
-     * instead of throwing so the merchant knows it is already in the queue.
-     */
-    async suggestCategory(name: string, type: "service" | "marketplace"): Promise<{ category: ProductCategoryEntity; alreadyPending: boolean }> {
-        const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
-        const existing = await this.productCategoryRepo.findOne({ where: { slug } });
-        if (existing) {
-            if (existing.isActive) {
-                throw new Error("This category is already live on the platform.");
-            }
-            // Already submitted and pending admin review - silently succeed
-            return { category: existing, alreadyPending: true };
-        }
-        const category = this.productCategoryRepo.create({ name, slug, type, isActive: false });
-        await this.productCategoryRepo.save(category);
-        return { category, alreadyPending: false };
-    }
-
     // ── Create ──────────────────────────────────────────────────────
 
     /**
      * Create a product with optional customizations & options (one transaction).
      */
-    async createProduct(merchantId: string, input: CreateProductInput): Promise<Product> {
+    async createProduct(
+        merchantId: string,
+        input: CreateProductInput,
+        opts: { allowAnyCategory?: boolean } = {},
+    ): Promise<Product> {
         const product = await AppDataSource.transaction(async (manager) => {
             const productRepo = manager.getRepository(Product);
             const custRepo = manager.getRepository(ProductCustomization);
             const optRepo = manager.getRepository(CustomizationOption);
             const statsRepo = manager.getRepository(MerchantStats);
+
+            // Only food, groceries and pharmacy can be listed. Checked here
+            // rather than in the controller so every merchant route is
+            // covered. The admin dashboard passes allowAnyCategory, because
+            // deciding what the platform carries is the admin's job; this
+            // gate exists to stop a merchant listing it themselves.
+            if (!opts.allowAnyCategory && !listable(input.category)) {
+                throw new Error(
+                    `Velo only accepts food, grocery and pharmacy listings. "${input.category}" is not one of them.`
+                );
+            }
 
             // Ensure category exists in product_categories table.
             const catRepo = manager.getRepository(ProductCategoryEntity);
@@ -257,6 +272,11 @@ export class ProductService {
                     throw new Error(
                         `Category "${input.category}" is a ${existingCat.type} category and cannot be used for a ${expectedType} listing. Please choose a ${expectedType} category.`
                     );
+                }
+                // Switched off in the admin means closed to new listings, not
+                // just hidden from the picker.
+                if (existingCat.isActive === false) {
+                    throw new Error(`Category "${input.category}" is not open for new listings right now.`);
                 }
             } else {
                 // Create the category with the type from the upload context when known,

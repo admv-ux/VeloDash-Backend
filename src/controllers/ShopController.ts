@@ -100,6 +100,9 @@ export class ShopController {
                     currency: order.currency,
                     status: order.status,
                     fulfillmentStatus: order.fulfillmentStatus,
+                    // Carrier tracking, so the order page can answer "where is
+                    // it" without the customer having to ask anyone.
+                    tracking: order.tracking || [],
                     paidAt: order.paidAt,
                     shippingAddress: order.shippingAddress,
                     createdAt: order.createdAt,

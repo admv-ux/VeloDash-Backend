@@ -283,7 +283,7 @@ export class AdminShopController {
                 res.status(409).json({
                     started: false,
                     queued: 0,
-                    message: "A catalogue sync is running. Try again when it finishes, in about half an hour.",
+                    message: "A catalogue sync or an earlier push is still running. Try again when it finishes, in about half an hour.",
                 });
                 return;
             }

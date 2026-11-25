@@ -61,9 +61,13 @@ describe("syncCategoryPage", () => {
             zendropProductId: 2693395,
             wholesalePrice: 7.99,
             shippingCost: 13.68,
-            landedCost: 21.67,
+            // 21.67 of supplier cost picks the band; the stored landed cost
+            // also carries the card fee taken out of the sale.
+            dutyCost: 0,
+            processingFee: 2.19,
+            landedCost: 23.86,
             multiplier: 1.8,
-            retailPrice: 39.99,
+            retailPrice: 42.99,
             categoryId: 61,
             categoryName: "Apparel",
             shipsFrom: "CN",
@@ -95,7 +99,7 @@ describe("syncCategoryPage", () => {
         await svc.syncCategoryPage(61);
 
         expect(saved[0].shippingCost).toBe(5);
-        expect(saved[0].landedCost).toBe(15);
+        expect(saved[0].landedCost).toBe(16.62); // 15 supplier + 1.62 card fee
         expect(saved[0].multiplier).toBe(1.8); // 15 sits in the middle band
         expect(saved[0].estimatedDelivery).toBe("9 days");
     });

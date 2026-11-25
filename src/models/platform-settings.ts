@@ -200,6 +200,30 @@ export class PlatformSettings {
     @Column({ type: "decimal", precision: 10, scale: 2, default: 0 })
     paymentProcessingFeeFixed: number;
 
+    // ── Shop (Zendrop catalogue) pricing policy ───────────────────────
+    //
+    // selling price = (product + shipping + duties + card fees) x multiplier.
+    // Product and shipping come from Zendrop per item; these three are the
+    // parts we decide, kept here so they can be changed without a deploy.
+    // Changing one does not move any price until the catalogue is repriced
+    // from the admin, because prices are stored on the product rows.
+
+    /** Customs and import duties set aside, as a percent of goods + freight. */
+    @Column({ type: "decimal", precision: 5, scale: 2, default: 0 })
+    shopDutyRate: number;
+
+    /**
+     * What the card processor keeps, as a percent of the selling price.
+     * Defaults to 4.4: Stripe's 2.9% domestic card rate plus the 1.5% for an
+     * international card, which most orders to 27 countries will be.
+     */
+    @Column({ type: "decimal", precision: 5, scale: 2, default: 4.4 })
+    shopProcessingFeeRate: number;
+
+    /** What the card processor keeps per transaction, flat, in USD. */
+    @Column({ type: "decimal", precision: 10, scale: 2, default: 0.3 })
+    shopProcessingFeeFixed: number;
+
     @Column({ type: "boolean", default: false })
     isGlobalSurgeActive: boolean;
 

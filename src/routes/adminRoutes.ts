@@ -1702,6 +1702,7 @@ router.post("/shop/sync/categories", adminRole, adminShopController.syncCategori
 // minutes, because Zendrop rate limits a sustained run.
 router.post("/shop/sync/store", adminRole, adminShopController.syncStore);
 router.post("/shop/sync/category/:categoryId", adminRole, adminShopController.syncCategory);
+router.get("/shop/pricing-policy", adminRole, adminShopController.pricingPolicy);
 router.post("/shop/reprice", adminRole, adminShopController.repriceAll);
 router.get("/shop/orders", adminRole, adminShopController.listOrders);
 router.get("/shop/orders/summary", adminRole, adminShopController.orderSummary);

@@ -24,7 +24,7 @@ export interface ShopProductVariant {
     storeVariantId: string;
     zendropVariantId: number | null;
     wholesale: number;
-    /** wholesale + the product's US shipping quote. */
+    /** Everything this variant costs us: goods, shipping, duties, card fee. */
     landedCost: number;
     retail: number;
     image: string | null;
@@ -128,7 +128,21 @@ export class ShopProduct {
     @Column({ type: "decimal", precision: 10, scale: 2, default: 0 })
     shippingCost: number;
 
-    /** wholesale + shipping, what we pay Zendrop. */
+    /** Set aside for customs and import duties, at the admin's rate. */
+    @Column({ type: "decimal", precision: 10, scale: 2, default: 0 })
+    dutyCost: number;
+
+    /**
+     * What the card processor keeps out of this sale, at the admin's rate.
+     * A real cost of selling, and the one the first pricing model left out.
+     */
+    @Column({ type: "decimal", precision: 10, scale: 2, default: 0 })
+    processingFee: number;
+
+    /**
+     * Everything one sale costs us: goods, shipping, duties and the card
+     * fee. The margin is measured against this, not against the goods.
+     */
     @Column({ type: "decimal", precision: 10, scale: 2, default: 0 })
     landedCost: number;
 

@@ -2,7 +2,8 @@ import { AppDataSource } from "../../db/data-source";
 import { ShopProduct, ShopProductVariant } from "../../models/shop-product";
 import { ShopCategory } from "../../models/shop-category";
 import { callZendropTool, zendropConfigured } from "./zendrop-client";
-import { retailPriceFor } from "../../config/shop-pricing";
+import { retailPriceFor, PricingPolicy } from "../../config/shop-pricing";
+import { loadPricingPolicy } from "./pricing-policy";
 import logger from "../../utils/logger";
 
 const log = logger.child({ service: "StoreSync" });
@@ -193,6 +194,7 @@ export class StoreSyncService {
         shippingCost: number,
         productName: string,
         productImage: string | null,
+        policy: PricingPolicy,
     ): { variants: ShopProductVariant[]; dropped: number } {
         const bySku = new Map<string, CatalogVariant>();
         for (const cv of catalogVariants) {
@@ -215,7 +217,7 @@ export class StoreSyncService {
                 return;
             }
 
-            const price = retailPriceFor(wholesale, shippingCost);
+            const price = retailPriceFor(wholesale, shippingCost, policy);
             if (price.retail <= price.cost || price.retail > MAX_SANE_RETAIL) {
                 dropped++;
                 return;
@@ -273,6 +275,14 @@ export class StoreSyncService {
     }
 
     /** Cheapest US shipping option, or null when Zendrop will not ship it there. */
+    private policyMemo: PricingPolicy | null = null;
+
+    /** Read once per service instance; a sync run is one instance. */
+    private async pricingPolicy(): Promise<PricingPolicy> {
+        if (!this.policyMemo) this.policyMemo = await loadPricingPolicy();
+        return this.policyMemo;
+    }
+
     private async shippingFor(productId: number): Promise<{ cost: number; eta: string | null } | null> {
         const res = await callZendropTool<{
             shipping_options: { type: string; price: number; estimated_delivery: string | null }[];
@@ -356,6 +366,7 @@ export class StoreSyncService {
         row.estimatedDelivery = ship.eta;
         row.shippingCost = ship.cost;
 
+        const policy = await this.pricingPolicy();
         const { variants } = this.buildVariants(
             mine?.variants || [],
             cat?.variants || [],
@@ -363,6 +374,7 @@ export class StoreSyncService {
             ship.cost,
             row.name,
             row.image,
+            policy,
         );
         row.variants = variants;
 
@@ -378,10 +390,15 @@ export class StoreSyncService {
         // The listed price is the cheapest variant, so the grid never promises
         // less than the product detail page can honour.
         const cheapest = variants.reduce((a, b) => (b.retail < a.retail ? b : a));
-        row.wholesalePrice = cheapest.wholesale;
-        row.landedCost = cheapest.landedCost;
-        row.retailPrice = cheapest.retail;
-        row.multiplier = Math.round((cheapest.retail / Math.max(cheapest.landedCost, 0.01)) * 100) / 100;
+        const listed = retailPriceFor(cheapest.wholesale, ship.cost, policy);
+        row.wholesalePrice = listed.wholesale;
+        row.dutyCost = listed.duty;
+        row.processingFee = listed.processing;
+        row.landedCost = listed.cost;
+        row.retailPrice = listed.retail;
+        // The band we charged, not retail divided by cost: those differ once
+        // the card fee is in the cost, and the column means the band.
+        row.multiplier = listed.multiplier;
         row.isFulfillable = true;
         row.unsellableReason = null;
         if (existing === null) row.isActive = true;

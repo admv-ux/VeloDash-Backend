@@ -3,6 +3,7 @@ import { ShopProduct } from "../../models/shop-product";
 import { ShopCategory } from "../../models/shop-category";
 import { callZendropTool, zendropConfigured } from "./zendrop-client";
 import { retailPriceFor } from "../../config/shop-pricing";
+import { loadPricingPolicy } from "./pricing-policy";
 import logger from "../../utils/logger";
 
 const log = logger.child({ service: "CatalogSync" });
@@ -96,6 +97,7 @@ export class CatalogSyncService {
         const products = res?.products || [];
         const category = await this.categoryRepo.findOne({ where: { zendropCategoryId: categoryId } });
 
+        const policy = await loadPricingPolicy();
         let saved = 0;
         let skipped = 0;
 
@@ -108,7 +110,7 @@ export class CatalogSyncService {
                 const ship = shipping[j];
                 if (!ship) { skipped++; continue; }
 
-                const price = retailPriceFor(Number(p.price) || 0, ship.cost);
+                const price = retailPriceFor(Number(p.price) || 0, ship.cost, policy);
                 if (price.retail <= price.cost) { skipped++; continue; }
 
                 const existing = await this.productRepo.findOne({ where: { zendropProductId: p.id } });
@@ -120,6 +122,8 @@ export class CatalogSyncService {
                 row.images = (p.images || []).map(img => img.url).filter(Boolean);
                 row.wholesalePrice = price.wholesale;
                 row.shippingCost = price.shipping;
+                row.dutyCost = price.duty;
+                row.processingFee = price.processing;
                 row.landedCost = price.cost;
                 row.multiplier = price.multiplier;
                 row.retailPrice = price.retail;

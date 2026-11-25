@@ -82,10 +82,13 @@ describe("buildVariants", () => {
         expect(variants).toHaveLength(0);
     });
 
-    it("includes shipping in the landed cost every variant is marked up from", () => {
+    it("marks a variant up from goods plus shipping, and still covers the card fee", () => {
         const { variants } = build([sv("1", "A")], [{ variant_id: 1, sku: "A", price: "10.00" }], 0, 7.5);
-        expect(variants[0].landedCost).toBe(17.5);
-        expect(variants[0].retail).toBeGreaterThan(17.5);
+        // Supplier cost 17.50 sets the band; landedCost also carries the
+        // processor's cut, which is why it is not 17.50 any more.
+        expect(variants[0].retail).toBe(34.99);
+        expect(variants[0].landedCost).toBe(19.34);
+        expect(variants[0].retail).toBeGreaterThan(variants[0].landedCost);
     });
 
     it("names a variant from its size and colour", () => {

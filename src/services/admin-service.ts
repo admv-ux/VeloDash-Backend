@@ -1901,6 +1901,9 @@ export class AdminService {
             usdExchangeRate: number;
             paymentProcessingFeeRate: number;
             paymentProcessingFeeFixed: number;
+            shopDutyRate: number;
+            shopProcessingFeeRate: number;
+            shopProcessingFeeFixed: number;
             isGlobalSurgeActive: boolean;
             globalSurgeMultiplier: number;
             ridesEnabled: boolean;

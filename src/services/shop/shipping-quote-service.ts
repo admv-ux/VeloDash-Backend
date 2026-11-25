@@ -151,10 +151,17 @@ export class ShippingQuoteService {
      * charged. A destination that is CHEAPER than the US costs the shopper
      * nothing extra and quietly widens our margin, which is the right way
      * round: never a surcharge that is not a real cost.
+     *
+     * The processor takes its percentage of the surcharge as well, so the
+     * difference is grossed up by that much. Charging the bare difference
+     * recovers the courier but not the fee on it, and the shortfall is the
+     * same kind of quiet leak the shelf price had.
      */
-    surchargePerUnit(product: ShopProduct, quote: CountryQuote): number {
+    surchargePerUnit(product: ShopProduct, quote: CountryQuote, feeRatePct = 0): number {
         const baseline = Number(product.shippingCost) || 0;
         const delta = quote.cost - baseline;
-        return delta > 0 ? Math.round(delta * 100) / 100 : 0;
+        if (!(delta > 0)) return 0;
+        const rate = Math.min(0.5, Math.max(0, Number(feeRatePct) || 0) / 100);
+        return Math.round((delta / (1 - rate)) * 100) / 100;
     }
 }

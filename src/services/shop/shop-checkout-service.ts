@@ -6,6 +6,7 @@ import { PlatformSettings } from "../../models/platform-settings";
 import { paymentProviderRegistry } from "../payment/payment-provider-registry";
 import { createServiceLogger } from "../../utils/logger";
 import { In } from "typeorm";
+import { loadPricingPolicy } from "./pricing-policy";
 import { ShippingQuoteService, BASELINE_COUNTRY } from "./shipping-quote-service";
 
 const log = createServiceLogger("ShopCheckout");
@@ -174,6 +175,9 @@ export class ShopCheckoutService {
         // to over twelve for the same destination.
         let shippingCents = 0;
         if (country !== BASELINE_COUNTRY) {
+            // The surcharge carries the card fee on itself, at the same rate
+            // the shelf prices were built on.
+            const feeRate = (await loadPricingPolicy()).processingRatePct;
             const ordered = [...wanted.values()].map((l) => byId.get(l.productId)!).filter(Boolean);
             const quotes = await this.shipping.quoteMany(ordered, country);
             // Every blocked item is named at once. Reporting them one at a
@@ -188,7 +192,7 @@ export class ShopCheckoutService {
                     blocked.push(p.name);
                     continue;
                 }
-                shippingCents += cents(this.shipping.surchargePerUnit(p, quote)) * line.quantity;
+                shippingCents += cents(this.shipping.surchargePerUnit(p, quote, feeRate)) * line.quantity;
             }
             if (blocked.length) {
                 const names = blocked.map((n) => `"${n.slice(0, 60)}"`).join(", ");

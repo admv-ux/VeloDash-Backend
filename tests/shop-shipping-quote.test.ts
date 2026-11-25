@@ -57,6 +57,24 @@ describe("surchargePerUnit", () => {
     it("charges nothing when the two match", () => {
         expect(svc().surchargePerUnit(product({ shippingCost: 5 }) as any, { cost: 5, eta: null })).toBe(0);
     });
+
+    it("carries the card fee on the surcharge too", () => {
+        // 7.81 of courier at 4.4% leaves 7.81 short by the fee on it. The
+        // shopper pays 8.17, we net the 7.81 the courier costs.
+        const out = svc().surchargePerUnit(product({ shippingCost: 4.58 }) as any, { cost: 12.39, eta: null }, 4.4);
+        expect(out).toBeCloseTo(8.17, 2);
+        expect(out * (1 - 0.044)).toBeGreaterThanOrEqual(7.81);
+    });
+
+    it("still charges nothing extra on a cheaper destination, fee or not", () => {
+        expect(svc().surchargePerUnit(product({ shippingCost: 44.77 }) as any, { cost: 22.49, eta: null }, 4.4)).toBe(0);
+    });
+
+    it("ignores a fee rate that makes no sense", () => {
+        const sane = svc().surchargePerUnit(product({ shippingCost: 1 }) as any, { cost: 11, eta: null }, 500);
+        expect(sane).toBeCloseTo(20, 2); // clamped at 50%, never negative or infinite
+        expect(svc().surchargePerUnit(product({ shippingCost: 1 }) as any, { cost: 11, eta: null }, -5)).toBe(10);
+    });
 });
 
 describe("quoteMany", () => {

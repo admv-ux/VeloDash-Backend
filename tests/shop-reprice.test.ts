@@ -150,6 +150,20 @@ describe("repricing the catalogue", () => {
         }
     });
 
+    it("skips a row with no supplier price instead of inventing one", async () => {
+        // The seven products Zendrop will not quote shipping for carry a
+        // wholesale of zero. Marked up they became 99 cent listings in the
+        // admin, beside a reason saying they cannot be shipped at all.
+        const h = harness([product({ wholesalePrice: 0, shippingCost: 0, retailPrice: 0 })]);
+        try {
+            const out = await h.svc.repriceAll();
+            expect(out).toMatchObject({ examined: 1, skipped: 1, changed: 0 });
+            expect(h.saved).toHaveLength(0);
+        } finally {
+            h.restore();
+        }
+    });
+
     it("never leaves a row priced at or under what the sale costs", async () => {
         const rows = [];
         for (let w = 0.5; w < 60; w += 7.3) rows.push(product({ id: `p${w}`, wholesalePrice: w, retailPrice: 0.99 }));

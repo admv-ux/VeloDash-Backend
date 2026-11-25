@@ -8,6 +8,8 @@ const log = logger.child({ service: "ShopReprice" });
 
 export interface RepriceResult {
     examined: number;
+    /** Rows with no supplier price, which cannot be marked up at all. */
+    skipped: number;
     changed: number;
     raised: number;
     lowered: number;
@@ -41,7 +43,16 @@ export class ShopRepriceService {
         let before = 0;
         let after = 0;
 
+        let skipped = 0;
+
         for (const p of all) {
+            // A row with no supplier price is one Zendrop would not quote at
+            // all. There is nothing to mark up, and pricing it anyway puts a
+            // 99 cent figure in the admin beside a product we cannot ship.
+            if (!(Number(p.wholesalePrice) > 0)) {
+                skipped++;
+                continue;
+            }
             const shipping = Number(p.shippingCost) || 0;
             const priced = retailPriceFor(Number(p.wholesalePrice), shipping, policy);
 
@@ -77,6 +88,7 @@ export class ShopRepriceService {
 
         const result: RepriceResult = {
             examined: all.length,
+            skipped,
             changed,
             raised,
             lowered,

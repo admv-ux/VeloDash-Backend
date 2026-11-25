@@ -8,8 +8,8 @@ import { StoreSyncService, UNSELLABLE } from "../services/shop/store-sync-servic
 import { zendropConfigured } from "../services/shop/zendrop-client";
 import { ZendropFulfillmentService, FulfillmentError } from "../services/shop/zendrop-fulfillment-service";
 import { shopifyConfigured, SHOPIFY_DOMAIN } from "../services/shop/shopify-order-service";
-import { retailPriceFor } from "../config/shop-pricing";
 import { loadPricingPolicy } from "../services/shop/pricing-policy";
+import { ShopRepriceService } from "../services/shop/reprice-service";
 import { MerchantApplicationService, MerchantApplicationError } from "../services/shop/merchant-application-service";
 import { MerchantApplicationStatus } from "../models/merchant-application";
 import logger from "../utils/logger";
@@ -386,66 +386,11 @@ export class AdminShopController {
     /**
      * Reprice the whole catalogue from what is already stored.
      *
-     * Prices live on the rows, so changing the duty or card fee rate in
-     * settings moves nothing until this runs. It touches no upstream API:
-     * goods and shipping are read from the row, and only the parts we decide
-     * are recomputed. Variants are repriced too, since the product page sells
-     * from those and the grid only shows the cheapest.
+     * The work is in ShopRepriceService so it can also be run without an
+     * HTTP request. Nothing here changes a price until this is called.
      */
     repriceAll = async (_req: Request, res: Response) => {
-        const repo = this.productRepo();
-        const policy = await loadPricingPolicy();
-        const all = await repo.find();
-        let changed = 0;
-        let raised = 0;
-        let lowered = 0;
-        let before = 0;
-        let after = 0;
-
-        for (const p of all) {
-            const shipping = Number(p.shippingCost) || 0;
-            const priced = retailPriceFor(Number(p.wholesalePrice), shipping, policy);
-
-            const variants = (p.variants || []).map((v) => {
-                const vp = retailPriceFor(Number(v.wholesale), shipping, policy);
-                return { ...v, landedCost: vp.cost, retail: vp.retail };
-            });
-
-            const wasRetail = Number(p.retailPrice);
-            const variantsMoved = variants.some(
-                (v, i) => v.retail !== Number((p.variants || [])[i]?.retail),
-            );
-            if (wasRetail === priced.retail && Number(p.multiplier) === priced.multiplier
-                && Number(p.landedCost) === priced.cost && !variantsMoved) {
-                continue;
-            }
-
-            p.dutyCost = priced.duty;
-            p.processingFee = priced.processing;
-            p.landedCost = priced.cost;
-            p.multiplier = priced.multiplier;
-            p.retailPrice = priced.retail;
-            p.variants = variants;
-            await repo.save(p);
-
-            changed++;
-            if (priced.retail > wasRetail) raised++;
-            if (priced.retail < wasRetail) lowered++;
-            before += wasRetail;
-            after += priced.retail;
-        }
-
-        const payload = {
-            examined: all.length,
-            changed,
-            raised,
-            lowered,
-            policy,
-            averageBefore: changed ? Math.round((before / changed) * 100) / 100 : 0,
-            averageAfter: changed ? Math.round((after / changed) * 100) / 100 : 0,
-        };
-        log.info("Repriced catalogue", payload);
-        res.json(payload);
+        res.json(await new ShopRepriceService().repriceAll());
     };
 
     // ---- Fulfilment -------------------------------------------------------

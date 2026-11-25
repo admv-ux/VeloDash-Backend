@@ -224,6 +224,19 @@ export class PlatformSettings {
     @Column({ type: "decimal", precision: 10, scale: 2, default: 0.3 })
     shopProcessingFeeFixed: number;
 
+    /**
+     * Freight we refuse to carry. Zendrop quotes shipping per product and for
+     * bulky goods it can dwarf the item: a 36 dollar gaming chair quoted at
+     * 1,010.88 to ship priced out at 1,850.99. Above this cap, or above the
+     * ratio once freight is more than postage, the product is held back
+     * rather than listed at a price nobody would pay.
+     */
+    @Column({ type: "decimal", precision: 10, scale: 2, default: 50 })
+    shopMaxShippingUsd: number;
+
+    @Column({ type: "decimal", precision: 5, scale: 2, default: 4 })
+    shopMaxShippingRatio: number;
+
     @Column({ type: "boolean", default: false })
     isGlobalSurgeActive: boolean;
 

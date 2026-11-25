@@ -1904,6 +1904,8 @@ export class AdminService {
             shopDutyRate: number;
             shopProcessingFeeRate: number;
             shopProcessingFeeFixed: number;
+            shopMaxShippingUsd: number;
+            shopMaxShippingRatio: number;
             isGlobalSurgeActive: boolean;
             globalSurgeMultiplier: number;
             ridesEnabled: boolean;

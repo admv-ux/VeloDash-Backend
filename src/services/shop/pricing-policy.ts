@@ -1,6 +1,7 @@
 import { AppDataSource } from "../../db/data-source";
 import { PlatformSettings } from "../../models/platform-settings";
 import { DEFAULT_PRICING_POLICY, PricingPolicy } from "../../config/shop-pricing";
+import { DEFAULT_FREIGHT_LIMITS, FreightLimits } from "../../config/shop-freight";
 
 /**
  * The parts of the shelf price we decide rather than the supplier: the duty
@@ -30,5 +31,25 @@ export async function loadPricingPolicy(): Promise<PricingPolicy> {
         dutyRatePct: num(settings.shopDutyRate, DEFAULT_PRICING_POLICY.dutyRatePct),
         processingRatePct: num(settings.shopProcessingFeeRate, DEFAULT_PRICING_POLICY.processingRatePct),
         processingFixedUsd: num(settings.shopProcessingFeeFixed, DEFAULT_PRICING_POLICY.processingFixedUsd),
+    };
+}
+
+/**
+ * The freight we are willing to carry. Admin editable for the same reason
+ * the rates are: the right cap is a commercial judgement, not a constant.
+ */
+export async function loadFreightLimits(): Promise<FreightLimits> {
+    const repo = AppDataSource.getRepository(PlatformSettings);
+    const settings =
+        (await repo.findOne({ where: { country: SHOP_SETTINGS_COUNTRY } })) ||
+        (await repo.findOne({ where: {}, order: { country: "ASC" } }));
+    if (!settings) return DEFAULT_FREIGHT_LIMITS;
+    const num = (v: unknown, fallback: number) => {
+        const n = Number(v);
+        return Number.isFinite(n) && n > 0 ? n : fallback;
+    };
+    return {
+        maxShippingUsd: num(settings.shopMaxShippingUsd, DEFAULT_FREIGHT_LIMITS.maxShippingUsd),
+        maxShippingRatio: num(settings.shopMaxShippingRatio, DEFAULT_FREIGHT_LIMITS.maxShippingRatio),
     };
 }

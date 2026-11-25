@@ -8,7 +8,7 @@ import { StoreSyncService, UNSELLABLE } from "../services/shop/store-sync-servic
 import { zendropConfigured } from "../services/shop/zendrop-client";
 import { ZendropFulfillmentService, FulfillmentError } from "../services/shop/zendrop-fulfillment-service";
 import { shopifyConfigured, SHOPIFY_DOMAIN } from "../services/shop/shopify-order-service";
-import { loadPricingPolicy } from "../services/shop/pricing-policy";
+import { loadPricingPolicy, loadFreightLimits } from "../services/shop/pricing-policy";
 import { ShopRepriceService } from "../services/shop/reprice-service";
 import { MerchantApplicationService, MerchantApplicationError } from "../services/shop/merchant-application-service";
 import { MerchantApplicationStatus } from "../models/merchant-application";
@@ -379,7 +379,7 @@ export class AdminShopController {
 
     /** The pricing policy in force, for the admin to read and to edit. */
     pricingPolicy = async (_req: Request, res: Response) => {
-        res.json({ policy: await loadPricingPolicy() });
+        res.json({ policy: await loadPricingPolicy(), freight: await loadFreightLimits() });
     };
 
     /** Recompute every stored price from the current rule, after a tier change. */

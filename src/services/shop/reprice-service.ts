@@ -1,7 +1,9 @@
 import { AppDataSource } from "../../db/data-source";
 import { ShopProduct } from "../../models/shop-product";
 import { retailPriceFor, PricingPolicy } from "../../config/shop-pricing";
-import { loadPricingPolicy } from "./pricing-policy";
+import { loadPricingPolicy, loadFreightLimits } from "./pricing-policy";
+import { freightProblem } from "../../config/shop-freight";
+import { UNSELLABLE } from "./store-sync-service";
 import logger from "../../utils/logger";
 
 const log = logger.child({ service: "ShopReprice" });
@@ -10,6 +12,8 @@ export interface RepriceResult {
     examined: number;
     /** Rows with no supplier price, which cannot be marked up at all. */
     skipped: number;
+    /** Rows withdrawn because freight dwarfs the goods. */
+    withdrawn: number;
     changed: number;
     raised: number;
     lowered: number;
@@ -35,6 +39,7 @@ export class ShopRepriceService {
 
     async repriceAll(): Promise<RepriceResult> {
         const policy = await loadPricingPolicy();
+        const freight = await loadFreightLimits();
         const all = await this.productRepo.find();
 
         let changed = 0;
@@ -44,6 +49,7 @@ export class ShopRepriceService {
         let after = 0;
 
         let skipped = 0;
+        let withdrawn = 0;
 
         for (const p of all) {
             // A row with no supplier price is one Zendrop would not quote at
@@ -54,6 +60,24 @@ export class ShopRepriceService {
                 continue;
             }
             const shipping = Number(p.shippingCost) || 0;
+
+            // Freight that dwarfs the goods is withdrawn here as well as at
+            // sync time, so a changed limit takes effect without waiting
+            // half an hour for a full pass over the store. Only ever
+            // withdrawn: putting one back needs the store checks that only
+            // the sync can make.
+            const problem = freightProblem(Number(p.wholesalePrice), shipping, freight);
+            if (problem) {
+                if (p.isFulfillable) {
+                    p.isFulfillable = false;
+                    p.unsellableReason = UNSELLABLE.FREIGHT_TOO_HIGH;
+                    await this.productRepo.save(p);
+                    withdrawn++;
+                    log.info("Withdrew a product on freight", { id: p.id, reason: problem });
+                }
+                continue;
+            }
+
             const priced = retailPriceFor(Number(p.wholesalePrice), shipping, policy);
 
             const previous = p.variants || [];
@@ -89,6 +113,7 @@ export class ShopRepriceService {
         const result: RepriceResult = {
             examined: all.length,
             skipped,
+            withdrawn,
             changed,
             raised,
             lowered,

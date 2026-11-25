@@ -38,6 +38,8 @@ function harness(rows: any[], policy = DEFAULT_PRICING_POLICY) {
 
 const product = (over: Record<string, any> = {}) => ({
     id: "p1",
+    isFulfillable: true,
+    unsellableReason: null,
     wholesalePrice: 2.65,
     shippingCost: 6.34,
     retailPrice: 19.99,
@@ -158,6 +160,39 @@ describe("repricing the catalogue", () => {
         try {
             const out = await h.svc.repriceAll();
             expect(out).toMatchObject({ examined: 1, skipped: 1, changed: 0 });
+            expect(h.saved).toHaveLength(0);
+        } finally {
+            h.restore();
+        }
+    });
+
+    it("withdraws a product whose freight dwarfs it, and stops pricing it", async () => {
+        const chair = product({
+            wholesalePrice: 36.27,
+            shippingCost: 1010.88,
+            retailPrice: 1850.99,
+            isFulfillable: true,
+        });
+        const h = harness([chair]);
+        try {
+            const out = await h.svc.repriceAll();
+            expect(out.withdrawn).toBe(1);
+            expect(out.changed).toBe(0);
+            expect(h.saved[0].isFulfillable).toBe(false);
+            expect(h.saved[0].unsellableReason).toContain("Shipping costs too much");
+            // The price is left where it was: it is not on sale any more.
+            expect(h.saved[0].retailPrice).toBe(1850.99);
+        } finally {
+            h.restore();
+        }
+    });
+
+    it("does not keep rewriting a product already withdrawn", async () => {
+        const chair = product({ wholesalePrice: 36.27, shippingCost: 1010.88, isFulfillable: false });
+        const h = harness([chair]);
+        try {
+            const out = await h.svc.repriceAll();
+            expect(out.withdrawn).toBe(0);
             expect(h.saved).toHaveLength(0);
         } finally {
             h.restore();

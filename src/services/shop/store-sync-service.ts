@@ -3,7 +3,8 @@ import { ShopProduct, ShopProductVariant } from "../../models/shop-product";
 import { ShopCategory } from "../../models/shop-category";
 import { callZendropTool, zendropConfigured } from "./zendrop-client";
 import { retailPriceFor, PricingPolicy } from "../../config/shop-pricing";
-import { loadPricingPolicy } from "./pricing-policy";
+import { loadPricingPolicy, loadFreightLimits } from "./pricing-policy";
+import { freightProblem, FreightLimits } from "../../config/shop-freight";
 import logger from "../../utils/logger";
 
 const log = logger.child({ service: "StoreSync" });
@@ -90,6 +91,7 @@ export const UNSELLABLE = {
     NOT_IN_STORE: "Not pushed to the Shopify store",
     NO_SHIPPING_QUOTE: "Zendrop will not quote shipping for this",
     NO_VARIANTS: "No variant we can order",
+    FREIGHT_TOO_HIGH: "Shipping costs too much for what it is",
     LEFT_THE_STORE: "Removed from the store upstream",
 } as const;
 
@@ -276,11 +278,17 @@ export class StoreSyncService {
 
     /** Cheapest US shipping option, or null when Zendrop will not ship it there. */
     private policyMemo: PricingPolicy | null = null;
+    private freightMemo: FreightLimits | null = null;
 
     /** Read once per service instance; a sync run is one instance. */
     private async pricingPolicy(): Promise<PricingPolicy> {
         if (!this.policyMemo) this.policyMemo = await loadPricingPolicy();
         return this.policyMemo;
+    }
+
+    private async freightLimits(): Promise<FreightLimits> {
+        if (!this.freightMemo) this.freightMemo = await loadFreightLimits();
+        return this.freightMemo;
     }
 
     private async shippingFor(productId: number): Promise<{ cost: number; eta: string | null } | null> {
@@ -365,6 +373,20 @@ export class StoreSyncService {
 
         row.estimatedDelivery = ship.eta;
         row.shippingCost = ship.cost;
+
+        // Freight that dwarfs the goods makes a listing nobody would buy, so
+        // the row is kept for the admin and never offered. Checked against
+        // the catalogue price, which is the cheapest the product can be.
+        const goods = Number(cat?.price) || 0;
+        const freight = freightProblem(goods, ship.cost, await this.freightLimits());
+        if (freight) {
+            log.info("Holding back a product on freight", { productId: entry.product_id, reason: freight });
+            row.wholesalePrice = goods;
+            row.isFulfillable = false;
+            row.unsellableReason = UNSELLABLE.FREIGHT_TOO_HIGH;
+            await this.productRepo.save(row);
+            return false;
+        }
 
         const policy = await this.pricingPolicy();
         const { variants } = this.buildVariants(
